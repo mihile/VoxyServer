@@ -191,6 +191,10 @@ public class Voxyserver implements ModInitializer {
             LOGGER.info("generateonchunkload changed, requires server restart to take effect");
             restartNotes.add("generateOnChunkLoad requires a server restart to take effect");
         }
+        if (oldCfg.generateOnChunkUnload != newCfg.generateOnChunkUnload) {
+            LOGGER.info("generateonchunkunload changed, requires server restart to take effect");
+            restartNotes.add("generateOnChunkUnload requires a server restart to take effect");
+        }
         if (oldCfg.dirtyTrackingEnabled != newCfg.dirtyTrackingEnabled) {
             LOGGER.info("dirtytrackingenabled changed, requires server restart to take effect");
             restartNotes.add("dirtyTrackingEnabled requires a server restart to take effect");

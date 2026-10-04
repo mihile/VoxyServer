@@ -25,11 +25,17 @@ public record LODSectionPayload(
             StreamCodec.of(LODSectionPayload::write, LODSectionPayload::read);
 
     private static void write(RegistryFriendlyByteBuf buf, LODSectionPayload payload) {
+        int lutLen = payload.lutBlockStateIds.length;
+        if (lutLen < 1 || lutLen > LODBulkPayload.MAX_LUT_ENTRIES
+                || payload.lutBiomeIds.length != lutLen || payload.lutLight.length != lutLen
+                || payload.indexArray.length < 1
+                || payload.indexArray.length > LODBulkPayload.MAX_INDEX_ENTRIES) {
+            throw new IllegalArgumentException("invalid section data");
+        }
         buf.writeIdentifier(payload.dimension);
         buf.writeLong(payload.sectionKey);
         buf.writeLong(payload.contentHash);
 
-        int lutLen = payload.lutBlockStateIds.length;
         buf.writeVarInt(lutLen);
         for (int i = 0; i < lutLen; i++) {
             buf.writeVarInt(payload.lutBlockStateIds[i]);
@@ -60,6 +66,9 @@ public record LODSectionPayload(
         long contentHash = buf.readLong();
 
         int lutLen = buf.readVarInt();
+        if (lutLen < 1 || lutLen > LODBulkPayload.MAX_LUT_ENTRIES) {
+            throw new IllegalArgumentException("invalid lookup table size: " + lutLen);
+        }
         int[] blockStateIds = new int[lutLen];
         int[] biomeIds = new int[lutLen];
         byte[] light = new byte[lutLen];
@@ -71,6 +80,10 @@ public record LODSectionPayload(
 
         int indexLen = buf.readVarInt();
         int bitsPerEntry = buf.readByte() & 0xFF;
+        if (indexLen < 1 || indexLen > LODBulkPayload.MAX_INDEX_ENTRIES
+                || bitsPerEntry < 1 || bitsPerEntry > 16) {
+            throw new IllegalArgumentException("invalid packed lod index data");
+        }
         int entriesPerLong = 64 / bitsPerEntry;
         long mask = (1L << bitsPerEntry) - 1;
         short[] indexArray = new short[indexLen];

@@ -149,6 +149,16 @@ server admins can import existing generated chunks into voxy storage with the fo
 
 imports run sequentially and read existing `region/*.mca` files directly, which is much faster than waiting for chunks to be loaded normally. imported dimensions are refreshed for connected voxy clients automatically once the import completes.
 
+imports can be resumed if eg server crashes
+
+add `force` to rebuild the selected dimensions regardless of previous progress:
+
+- `/voxyserver import existing all force`
+- `/voxyserver import existing current force`
+- `/voxyserver import existing dimension minecraft:overworld force`
+
+checkpoints are inside each dimension's LOD `storage/import-checkpoints/` directory. deleting the lod storage also deletes its import progress.
+
 ## storage
 
 LOD data is stored per world at `<world>/voxyserver/`. this can be safely deleted to regenerate all LOD data.

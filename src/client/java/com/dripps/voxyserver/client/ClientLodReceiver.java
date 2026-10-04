@@ -2,11 +2,13 @@ package com.dripps.voxyserver.client;
 
 import com.dripps.voxyserver.client.service.IVoxyServerIngestAccess;
 import com.dripps.voxyserver.client.service.RemoteIngestService;
+import com.dripps.voxyserver.network.LODBatchResultPayload;
 import com.dripps.voxyserver.network.LODClearPayload;
 import com.dripps.voxyserver.network.LODHandshakePayload;
 import com.dripps.voxyserver.network.LODHashSyncSettingsPayload;
 import com.dripps.voxyserver.network.LODProtocolPayload;
 import com.dripps.voxyserver.network.LODServerSettingsPayload;
+import com.dripps.voxyserver.network.LODStreamSessionPayload;
 import com.dripps.voxyserver.network.PreSerializedLodPayload;
 import com.dripps.voxyserver.network.VoxyServerNetworking;
 import me.cortex.voxy.commonImpl.VoxyCommon;
@@ -18,15 +20,45 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
-import net.minecraft.core.RegistryAccess;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.Identifier;
 
-public class ClientLodReceiver {
+import java.util.ArrayDeque;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+
+public final class ClientLodReceiver {
+    private static final int MAX_INBOUND_BATCHES = 64;
+    private static final long MAX_INBOUND_BYTES = 64L * 1024L * 1024L;
+    private static final Object inboundLock = new Object();
+    private static final ArrayDeque<Inbound> inboundQueue = new ArrayDeque<>();
+    private static final AtomicBoolean drainScheduled = new AtomicBoolean();
+    private static final AtomicLong connectionGeneration = new AtomicLong();
+    private static int reservedBatches;
+    private static long reservedBytes;
+    private static volatile long networkEpoch;
+    private static volatile Identifier networkDimension;
+
+    private static final class Inbound {
+        private final PreSerializedLodPayload payload;
+        private final long connectionGeneration;
+        private final AtomicBoolean released = new AtomicBoolean();
+
+        private Inbound(PreSerializedLodPayload payload, long connectionGeneration) {
+            this.payload = payload;
+            this.connectionGeneration = connectionGeneration;
+        }
+    }
 
     public static void register() {
         ClientTickEvents.END_CLIENT_TICK.register(client -> ClientLodSettings.onClientTick());
 
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
+            connectionGeneration.incrementAndGet();
+            networkEpoch = 0L;
+            networkDimension = null;
+            clearQueuedInbound(false);
             ClientLodSettings.prepareForCurrentConnection();
             if (ClientPlayNetworking.canSend(LODHandshakePayload.TYPE)) {
                 ClientPlayNetworking.send(new LODHandshakePayload(VoxyServerNetworking.PROTOCOL_VERSION));
@@ -34,86 +66,237 @@ public class ClientLodReceiver {
         });
 
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
+            connectionGeneration.incrementAndGet();
+            networkEpoch = 0L;
+            networkDimension = null;
+            clearQueuedInbound(false);
             ClientLodSettings.reset();
-            setIngestDimension(null);
+            setIngestSession(null, 0L);
             setRemoteIngest(false);
             ClientLodHashStore.get().flush();
         });
 
-        ClientPlayNetworking.registerGlobalReceiver(LODProtocolPayload.TYPE, (payload, context) -> {
-            context.client().execute(() -> {
-                int serverProto = payload.protocol();
-                int clientProto = VoxyServerNetworking.PROTOCOL_VERSION;
-                if (serverProto == clientProto) {
+        ClientPlayNetworking.registerGlobalReceiver(LODProtocolPayload.TYPE, (payload, context) ->
+                context.client().execute(() -> {
+                    int serverProtocol = payload.protocol();
+                    int clientProtocol = VoxyServerNetworking.PROTOCOL_VERSION;
+                if (serverProtocol == clientProtocol) {
                     ClientLodSettings.setProtocolOk(true);
                 } else {
                     ClientLodSettings.setProtocolOk(false);
-                    if (serverProto < clientProto) {
-                        tellPlayer(serverOutOfDateMessage());
+                    disableRemoteIngest();
+                        if (serverProtocol < clientProtocol) tellPlayer(serverOutOfDateMessage());
                     }
-                }
+                }));
+
+        ClientPlayNetworking.registerGlobalReceiver(LODServerSettingsPayload.TYPE, (payload, context) ->
+                context.client().execute(() -> ClientLodSettings.applyServerSettings(
+                        payload.maxLodStreamRadius(), payload.maxSectionsPerTick())));
+
+        ClientPlayNetworking.registerGlobalReceiver(LODHashSyncSettingsPayload.TYPE, (payload, context) ->
+                context.client().execute(() -> ClientLodSettings.applyHashSyncSettings(payload.enabled())));
+
+        ClientPlayNetworking.registerGlobalReceiver(LODStreamSessionPayload.TYPE, (payload, context) -> {
+            boolean changed = networkEpoch != payload.streamEpoch()
+                    || !Objects.equals(networkDimension, payload.dimension());
+            networkEpoch = payload.streamEpoch();
+            networkDimension = payload.dimension();
+            context.client().execute(() -> {
+                clearStaleQueuedInbound(payload.streamEpoch());
+                if (changed) setIngestSession(payload.dimension(), payload.streamEpoch());
+                setRemoteIngest(ClientLodSettings.isEnabled());
+                ClientLodSettings.applyStreamSession(payload);
             });
-        });
-
-        ClientPlayNetworking.registerGlobalReceiver(LODServerSettingsPayload.TYPE, (payload, context) -> {
-            context.client().execute(() -> ClientLodSettings.applyServerSettings(
-                    payload.maxLodStreamRadius(), payload.maxSectionsPerTick()));
-        });
-
-        ClientPlayNetworking.registerGlobalReceiver(LODHashSyncSettingsPayload.TYPE, (payload, context) -> {
-            context.client().execute(() -> ClientLodSettings.applyHashSyncSettings(payload.enabled()));
         });
 
         ClientPlayNetworking.registerGlobalReceiver(PreSerializedLodPayload.TYPE, (payload, context) -> {
-            context.client().execute(() -> {
-                if (!ClientLodSettings.isProtocolOk()) return;
-                ClientLevel level = context.client().level;
-                if (level == null) return;
-
-                VoxyInstance instance = VoxyCommon.getInstance();
-                if (instance == null) return;
-
-                ((IVoxyServerIngestAccess) instance).voxyserver$setUsingRemoteIngest(true);
-
-                RemoteIngestService ingestService =
-                        ((IVoxyServerIngestAccess) instance).voxyserver$getRemoteIngestService();
-                if (ingestService == null || !ingestService.isLive()) return;
-
-                WorldIdentifier worldId = WorldIdentifier.of(level);
-                if (worldId == null) return;
-
-                RegistryAccess registryAccess = level.registryAccess();
-                var dimension = level.dimension().identifier();
-
-                ingestService.setActiveDimension(dimension);
-                ingestService.enqueueIngest(worldId, dimension, payload, registryAccess);
-            });
+            if (!ClientLodSettings.isProtocolOk()
+                    || payload.streamEpoch() != networkEpoch
+                    || networkDimension == null) {
+                sendResult(context.client(), new LODBatchResultPayload(
+                        payload.streamEpoch(), payload.batchId(), LODBatchResultPayload.STALE),
+                        connectionGeneration.get());
+                return;
+            }
+            long generation = connectionGeneration.get();
+            Inbound inbound = new Inbound(payload, generation);
+            if (!reserveInbound(inbound)) {
+                sendResult(context.client(), new LODBatchResultPayload(
+                        payload.streamEpoch(), payload.batchId(), LODBatchResultPayload.OVERFLOW), generation);
+                return;
+            }
+            scheduleDrain(context.client());
         });
 
-        ClientPlayNetworking.registerGlobalReceiver(LODClearPayload.TYPE, (payload, context) -> {
-            context.client().execute(() -> handleClear(payload));
+        ClientPlayNetworking.registerGlobalReceiver(LODClearPayload.TYPE, (payload, context) ->
+                context.client().execute(() -> handleClear(payload)));
+    }
+
+    private static boolean reserveInbound(Inbound inbound) {
+        synchronized (inboundLock) {
+            int bytes = inbound.payload.data().length;
+            if (reservedBatches >= MAX_INBOUND_BATCHES || reservedBytes + bytes > MAX_INBOUND_BYTES) {
+                return false;
+            }
+            reservedBatches++;
+            reservedBytes += bytes;
+            inboundQueue.addLast(inbound);
+            return true;
+        }
+    }
+
+    private static void scheduleDrain(Minecraft client) {
+        if (drainScheduled.compareAndSet(false, true)) {
+            client.execute(() -> drainInbound(client));
+        }
+    }
+
+    private static void drainInbound(Minecraft client) {
+        try {
+            while (true) {
+                Inbound inbound;
+                synchronized (inboundLock) {
+                    inbound = inboundQueue.pollFirst();
+                }
+                if (inbound == null) return;
+                dispatchInbound(client, inbound);
+            }
+        } finally {
+            drainScheduled.set(false);
+            synchronized (inboundLock) {
+                if (!inboundQueue.isEmpty()) scheduleDrain(client);
+            }
+        }
+    }
+
+    private static void dispatchInbound(Minecraft client, Inbound inbound) {
+        ClientLevel level = client.level;
+        Identifier dimension = level == null ? null : level.dimension().identifier();
+        if (inbound.connectionGeneration != connectionGeneration.get()
+                || inbound.payload.streamEpoch() != networkEpoch
+                || !Objects.equals(dimension, networkDimension)) {
+            completeInbound(client, inbound, new LODBatchResultPayload(
+                    inbound.payload.streamEpoch(), inbound.payload.batchId(), LODBatchResultPayload.STALE));
+            return;
+        }
+
+        VoxyInstance instance = VoxyCommon.getInstance();
+        WorldIdentifier worldId = level == null ? null : WorldIdentifier.of(level);
+        if (instance == null || worldId == null) {
+            completeInbound(client, inbound, new LODBatchResultPayload(
+                    inbound.payload.streamEpoch(), inbound.payload.batchId(), LODBatchResultPayload.FAILURE));
+            return;
+        }
+
+        RemoteIngestService service =
+                ((IVoxyServerIngestAccess) instance).voxyserver$getRemoteIngestService();
+        if (service == null || !service.isLive()) {
+            completeInbound(client, inbound, new LODBatchResultPayload(
+                    inbound.payload.streamEpoch(), inbound.payload.batchId(), LODBatchResultPayload.FAILURE));
+            return;
+        }
+
+        ((IVoxyServerIngestAccess) instance).voxyserver$setUsingRemoteIngest(true);
+        service.startSession(dimension, inbound.payload.streamEpoch());
+        boolean accepted = service.enqueueIngest(
+                worldId,
+                dimension,
+                inbound.payload,
+                level.registryAccess(),
+                result -> completeInbound(client, inbound, result)
+        );
+        if (!accepted) {
+            completeInbound(client, inbound, new LODBatchResultPayload(
+                    inbound.payload.streamEpoch(), inbound.payload.batchId(), LODBatchResultPayload.OVERFLOW));
+        }
+    }
+
+    private static void completeInbound(Minecraft client, Inbound inbound, LODBatchResultPayload result) {
+        releaseInbound(inbound);
+        sendResult(client, result, inbound.connectionGeneration);
+    }
+
+    private static void releaseInbound(Inbound inbound) {
+        if (!inbound.released.compareAndSet(false, true)) return;
+        synchronized (inboundLock) {
+            reservedBatches--;
+            reservedBytes -= inbound.payload.data().length;
+        }
+    }
+
+    private static void clearQueuedInbound(boolean sendStale) {
+        Minecraft client = Minecraft.getInstance();
+        while (true) {
+            Inbound inbound;
+            synchronized (inboundLock) {
+                inbound = inboundQueue.pollFirst();
+            }
+            if (inbound == null) return;
+            releaseInbound(inbound);
+            if (sendStale) {
+                sendResult(client, new LODBatchResultPayload(
+                        inbound.payload.streamEpoch(), inbound.payload.batchId(), LODBatchResultPayload.STALE),
+                        inbound.connectionGeneration);
+            }
+        }
+    }
+
+    private static void clearStaleQueuedInbound(long epoch) {
+        Minecraft client = Minecraft.getInstance();
+        ArrayDeque<Inbound> stale = new ArrayDeque<>();
+        synchronized (inboundLock) {
+            var iterator = inboundQueue.iterator();
+            while (iterator.hasNext()) {
+                Inbound inbound = iterator.next();
+                if (inbound.payload.streamEpoch() != epoch) {
+                    iterator.remove();
+                    stale.addLast(inbound);
+                }
+            }
+        }
+        for (Inbound inbound : stale) {
+            releaseInbound(inbound);
+            sendResult(client, new LODBatchResultPayload(
+                    inbound.payload.streamEpoch(), inbound.payload.batchId(), LODBatchResultPayload.STALE),
+                    inbound.connectionGeneration);
+        }
+    }
+
+    private static void sendResult(Minecraft client, LODBatchResultPayload result, long generation) {
+        client.execute(() -> {
+            if (generation != connectionGeneration.get() || client.getConnection() == null) return;
+            if (ClientPlayNetworking.canSend(LODBatchResultPayload.TYPE)) {
+                ClientPlayNetworking.send(result);
+            }
         });
     }
 
     private static void setRemoteIngest(boolean enabled) {
         VoxyInstance instance = VoxyCommon.getInstance();
-        if (instance == null) return;
-        ((IVoxyServerIngestAccess) instance).voxyserver$setUsingRemoteIngest(enabled);
-    }
-
-    private static void setIngestDimension(net.minecraft.resources.Identifier dimension) {
-        VoxyInstance instance = VoxyCommon.getInstance();
-        if (instance == null) return;
-        RemoteIngestService service = ((IVoxyServerIngestAccess) instance).voxyserver$getRemoteIngestService();
-        if (service != null) {
-            service.setActiveDimension(dimension);
+        if (instance != null) {
+            ((IVoxyServerIngestAccess) instance).voxyserver$setUsingRemoteIngest(enabled);
         }
     }
 
+    static void disableRemoteIngest() {
+        networkEpoch = 0L;
+        networkDimension = null;
+        clearQueuedInbound(true);
+        setIngestSession(null, 0L);
+        setRemoteIngest(false);
+    }
+
+    private static void setIngestSession(Identifier dimension, long epoch) {
+        VoxyInstance instance = VoxyCommon.getInstance();
+        if (instance == null) return;
+        RemoteIngestService service = ((IVoxyServerIngestAccess) instance).voxyserver$getRemoteIngestService();
+        if (service != null) service.startSession(dimension, epoch);
+    }
+
     private static void tellPlayer(Component message) {
-        Minecraft mc = Minecraft.getInstance();
-        if (mc.player != null) {
-            mc.gui.hud.getChat().addClientSystemMessage(message);
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.player != null) {
+            minecraft.gui.hud.getChat().addClientSystemMessage(message);
         }
     }
 
@@ -124,10 +307,9 @@ public class ClientLodReceiver {
     }
 
     private static void handleClear(LODClearPayload payload) {
-        Minecraft minecraft = Minecraft.getInstance();
-        ClientLevel level = minecraft.level;
-        if (level != null) {
-            setIngestDimension(level.dimension().identifier());
+        ClientLevel level = Minecraft.getInstance().level;
+        if (level != null && networkDimension != null) {
+            setIngestSession(networkDimension, networkEpoch);
         }
     }
 }

@@ -9,6 +9,7 @@ import com.mojang.brigadier.suggestion.SuggestionProvider;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.commands.arguments.IdentifierArgument;
 import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
@@ -35,11 +36,15 @@ public final class VoxyServerCommands {
                         .then(Commands.literal("import")
                                 .then(Commands.literal("existing")
                                         .then(Commands.literal("all")
-                                                .executes(context -> executeAll(context.getSource(), coordinatorSupplier)))
+                                                .executes(context -> executeAll(context.getSource(), coordinatorSupplier, false))
+                                                .then(Commands.literal("force")
+                                                        .executes(context -> executeAll(context.getSource(), coordinatorSupplier, true))))
                                         .then(Commands.literal("current")
-                                                .executes(context -> executeCurrent(context.getSource(), coordinatorSupplier)))
+                                                .executes(context -> executeCurrent(context.getSource(), coordinatorSupplier, false))
+                                                .then(Commands.literal("force")
+                                                        .executes(context -> executeCurrent(context.getSource(), coordinatorSupplier, true))))
                                         .then(Commands.literal("dimension")
-                                                .then(Commands.argument("dimension", StringArgumentType.greedyString())
+                                                .then(Commands.argument("dimension", IdentifierArgument.id())
                                                         .suggests((context, builder) -> {
                                                             java.util.List<String> dimensions = new java.util.ArrayList<>();
                                                             for (ServerLevel level : context.getSource().getServer().getAllLevels()) {
@@ -50,8 +55,11 @@ public final class VoxyServerCommands {
                                                         .executes(context -> executeDimension(
                                                                 context.getSource(),
                                                                 coordinatorSupplier,
-                                                                StringArgumentType.getString(context, "dimension")
-                                                        ))))
+                                                                IdentifierArgument.getId(context, "dimension").toString(), false
+                                                        ))
+                                                        .then(Commands.literal("force")
+                                                                .executes(context -> executeDimension(context.getSource(), coordinatorSupplier,
+                                                                        IdentifierArgument.getId(context, "dimension").toString(), true)))))
                                         .then(Commands.literal("status")
                                                 .executes(context -> executeStatus(context.getSource(), coordinatorSupplier)))
                                         .then(Commands.literal("cancel")
@@ -85,25 +93,25 @@ public final class VoxyServerCommands {
 
     static String ballsack = "import coordinator is not ready";
 
-    private static int executeAll(CommandSourceStack source, Supplier<WorldImportCoordinator> coordinatorSupplier) {
+    private static int executeAll(CommandSourceStack source, Supplier<WorldImportCoordinator> coordinatorSupplier, boolean force) {
         WorldImportCoordinator coordinator = coordinatorSupplier.get();
         if (coordinator == null) {
             source.sendFailure(Component.literal(ballsack));
             return 0;
         }
-        return coordinator.startAll(source) ? 1 : 0;
+        return coordinator.startAll(source, force) ? 1 : 0;
     }
 
-    private static int executeCurrent(CommandSourceStack source, Supplier<WorldImportCoordinator> coordinatorSupplier) {
+    private static int executeCurrent(CommandSourceStack source, Supplier<WorldImportCoordinator> coordinatorSupplier, boolean force) {
         WorldImportCoordinator coordinator = coordinatorSupplier.get();
         if (coordinator == null) {
             source.sendFailure(Component.literal(ballsack));
             return 0;
         }
-        return coordinator.startCurrent(source) ? 1 : 0;
+        return coordinator.startCurrent(source, force) ? 1 : 0;
     }
 
-    private static int executeDimension(CommandSourceStack source, Supplier<WorldImportCoordinator> coordinatorSupplier, String dimensionId) {
+    private static int executeDimension(CommandSourceStack source, Supplier<WorldImportCoordinator> coordinatorSupplier, String dimensionId, boolean force) {
         WorldImportCoordinator coordinator = coordinatorSupplier.get();
         if (coordinator == null) {
             source.sendFailure(Component.literal(ballsack));
@@ -115,7 +123,7 @@ public final class VoxyServerCommands {
             source.sendFailure(Component.literal("dunno dimension: " + dimensionId));
             return 0;
         }
-        return coordinator.startDimension(source, level) ? 1 : 0;
+        return coordinator.startDimension(source, level, force) ? 1 : 0;
     }
 
     private static int executeStatus(CommandSourceStack source, Supplier<WorldImportCoordinator> coordinatorSupplier) {

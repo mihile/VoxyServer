@@ -19,6 +19,7 @@ public class VoxyServerConfig {
     public int maxSectionsPerTickPerPlayer = 100;
     public int sectionsPerPacket = 50;
     public boolean generateOnChunkLoad = true;
+    public boolean generateOnChunkUnload = true;
     public int tickInterval = 5;
     public int workerThreads = 3;
     public boolean dirtyTrackingEnabled = true;

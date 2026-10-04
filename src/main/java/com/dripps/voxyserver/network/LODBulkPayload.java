@@ -14,6 +14,10 @@ public record LODBulkPayload(
         List<LODSectionPayload> sections
 ) implements CustomPacketPayload {
 
+    public static final int MAX_SECTIONS = PreSerializedLodPayload.MAX_SECTIONS;
+    public static final int MAX_LUT_ENTRIES = 32_768;
+    public static final int MAX_INDEX_ENTRIES = 32_768;
+
     public static final Type<LODBulkPayload> TYPE =
             new Type<>(Identifier.parse("voxyserver:lod_bulk"));
 
@@ -21,6 +25,9 @@ public record LODBulkPayload(
             StreamCodec.of(LODBulkPayload::write, LODBulkPayload::read);
 
     private static void write(RegistryFriendlyByteBuf buf, LODBulkPayload payload) {
+        if (payload.sections.isEmpty() || payload.sections.size() > MAX_SECTIONS) {
+            throw new IllegalArgumentException("invalid bulk section count");
+        }
         buf.writeIdentifier(payload.dimension);
         buf.writeVarInt(payload.sections.size());
         for (LODSectionPayload section : payload.sections) {
@@ -56,11 +63,17 @@ public record LODBulkPayload(
     private static LODBulkPayload read(RegistryFriendlyByteBuf buf) {
         Identifier dimension = buf.readIdentifier();
         int count = buf.readVarInt();
+        if (count < 1 || count > MAX_SECTIONS) {
+            throw new IllegalArgumentException("invalid bulk section count: " + count);
+        }
         List<LODSectionPayload> sections = new ArrayList<>(count);
         for (int s = 0; s < count; s++) {
             long sectionKey = buf.readLong();
             long contentHash = buf.readLong();
             int lutLen = buf.readVarInt();
+            if (lutLen < 1 || lutLen > MAX_LUT_ENTRIES) {
+                throw new IllegalArgumentException("invalid lookup table size: " + lutLen);
+            }
             int[] blockStateIds = new int[lutLen];
             int[] biomeIds = new int[lutLen];
             byte[] light = new byte[lutLen];
@@ -71,6 +84,10 @@ public record LODBulkPayload(
             }
             int indexLen = buf.readVarInt();
             int bitsPerEntry = buf.readByte() & 0xFF;
+            if (indexLen < 1 || indexLen > MAX_INDEX_ENTRIES
+                    || bitsPerEntry < 1 || bitsPerEntry > 16) {
+                throw new IllegalArgumentException("invalid packed lod index data");
+            }
             int entriesPerLong = 64 / bitsPerEntry;
             long mask = (1L << bitsPerEntry) - 1;
             short[] indexArray = new short[indexLen];

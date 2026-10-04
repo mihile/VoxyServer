@@ -6,10 +6,13 @@ import me.cortex.voxy.common.config.ConfigBuildCtx;
 import me.cortex.voxy.common.config.section.SectionStorage;
 import me.cortex.voxy.common.config.section.SectionSerializationStorage;
 import me.cortex.voxy.common.world.WorldEngine;
+import me.cortex.voxy.common.world.service.VoxelIngestService;
 import me.cortex.voxy.commonImpl.VoxyInstance;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
+import net.minecraft.core.SectionPos;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.chunk.LevelChunk;
 
 import java.nio.file.Path;
@@ -158,12 +161,27 @@ public class ServerLodEngine extends VoxyInstance {
     }
 
     boolean enqueueIngest(WorldEngine world, LevelChunk chunk) {
+        if (!chunk.isLightCorrect()) return false;
         synchronized (this.ingestReferenceLock) {
             if (!this.ingestReferencedWorlds.contains(world)) {
                 world.acquireRef();
                 this.ingestReferencedWorlds.add(world);
             }
-            return this.getIngestService().enqueueIngest(world, chunk);
+            var lighting = chunk.getLevel().getLightEngine();
+            var blockLight = lighting.getLayerListener(LightLayer.BLOCK);
+            var skyLight = lighting.getLayerListener(LightLayer.SKY);
+            var pos = chunk.getPos();
+            int sectionY = chunk.getMinSectionY();
+            for (var section : chunk.getSections()) {
+                var sectionPos = SectionPos.of(pos, sectionY++);
+                if (section == null) continue;
+                var block = blockLight.getDataLayerData(sectionPos);
+                var sky = skyLight.getDataLayerData(sectionPos);
+                if (block == null && sky == null && !section.hasOnlyAir()) return false;
+                if (!VoxelIngestService.rawIngest(world, section.copy(), pos.x(), sectionPos.y(), pos.z(),
+                        block == null ? null : block.copy(), sky == null ? null : sky.copy())) return false;
+            }
+            return true;
         }
     }
 
@@ -204,7 +222,11 @@ public class ServerLodEngine extends VoxyInstance {
         ctx.setProperty(ConfigBuildCtx.BASE_SAVE_PATH, this.basePath.toString());
         ctx.setProperty(ConfigBuildCtx.WORLD_IDENTIFIER, identifier.getWorldId());
         ctx.pushPath(ConfigBuildCtx.DEFAULT_STORAGE_PATH);
-        return this.storageConfig.build(ctx);
+        return new ImportSectionStorage(this.storageConfig.build(ctx));
+    }
+
+    Path importCheckpointPath(WorldIdentifier identifier) {
+        return this.basePath.resolve(identifier.getWorldId()).resolve("storage").resolve("import-checkpoints");
     }
 
     private void attachDirtyCallback(WorldIdentifier identifier, WorldEngine world,
@@ -219,6 +241,7 @@ public class ServerLodEngine extends VoxyInstance {
         }
 
         world.setDirtyCallback((section, updateFlags, neighborMsk) -> {
+            if (world.storage instanceof ImportSectionStorage storage) storage.capture(section);
             if (section.lvl != 0) {
                 return;
             }

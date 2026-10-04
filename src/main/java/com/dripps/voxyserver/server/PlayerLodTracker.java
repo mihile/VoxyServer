@@ -5,15 +5,34 @@ import me.cortex.voxy.common.world.WorldEngine;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ServerPlayer;
 
+import java.util.HashMap;
+import java.util.Map;
+import java.util.LinkedHashMap;
+
 public class PlayerLodTracker {
     public static final long NO_SECTION_KEY = -1L;
+    private static final int MAX_OUTSTANDING_BATCHES = 32;
+    private static final int MAX_OUTSTANDING_SECTIONS = 512;
+    private static final long MAX_OUTSTANDING_BYTES = 64L * 1024L * 1024L;
 
-    private final Long2LongOpenHashMap sentSectionHashes = new Long2LongOpenHashMap();
+    private final Long2LongOpenHashMap acknowledgedSectionHashes = new Long2LongOpenHashMap();
+    private final Long2LongOpenHashMap sectionOwners = new Long2LongOpenHashMap();
+    private final Map<Long, OutstandingBatch> outstandingBatches = new HashMap<>();
+    private final Map<Long, Long> deferredDirtySections = new LinkedHashMap<>();
+    private int manifestCenterX;
+    private int manifestCenterZ;
+    private int manifestRadius = -1;
     private volatile boolean ready = false;
     private volatile boolean protocolOk = false;
 
     private Identifier awaitingManifestDim;
     private long manifestDeadlineTick;
+    private long streamEpoch;
+    private long manifestRequestId;
+    private long nextBatchId;
+    private long outstandingBytes;
+    private int outstandingSections;
+    private long retryNotBeforeTick;
     private volatile Identifier activeDimension;
     private int lastChunkX;
     private int lastChunkZ;
@@ -36,8 +55,16 @@ public class PlayerLodTracker {
     private boolean scanExhausted;
     private long nextFullRescanTick;
 
+    public record StreamSession(Identifier dimension, long streamEpoch,
+                                long manifestRequestId, boolean manifestRequired) {}
+
+    public record Delivery(long streamEpoch, long batchId) {}
+
+    private record OutstandingBatch(long[] sectionKeys, long[] hashes, int bytes, long createdTick) {}
+
     public PlayerLodTracker() {
-        this.sentSectionHashes.defaultReturnValue(0L);
+        this.acknowledgedSectionHashes.defaultReturnValue(0L);
+        this.sectionOwners.defaultReturnValue(0L);
     }
 
     public boolean isReady() {
@@ -57,25 +84,177 @@ public class PlayerLodTracker {
     }
 
     public synchronized boolean hasSent(long sectionKey, long hash) {
-        return sentSectionHashes.containsKey(sectionKey) && sentSectionHashes.get(sectionKey) == hash;
+        return acknowledgedSectionHashes.containsKey(sectionKey)
+                && acknowledgedSectionHashes.get(sectionKey) == hash;
     }
 
-    public synchronized void markSent(long sectionKey, long hash) {
-        sentSectionHashes.put(sectionKey, hash);
+    public synchronized boolean hasOutstanding(long sectionKey) {
+        return sectionOwners.containsKey(sectionKey);
     }
 
-    public synchronized void applyManifestBatch(int dimensionOrdinal, long[] sectionKeys, long[] hashes) {
+    public synchronized boolean applyManifestBatch(Identifier dimension, long epoch, long requestId,
+                                                    int dimensionOrdinal, long[] sectionKeys, long[] hashes) {
+        if (!matchesManifestLocked(dimension, epoch, requestId)) return false;
         int count = Math.min(sectionKeys.length, hashes.length);
         for (int i = 0; i < count; i++) {
             long sectionKey = LodStreamingService.composeSectionKey(dimensionOrdinal, sectionKeys[i]);
-            if (!sentSectionHashes.containsKey(sectionKey)) {
-                sentSectionHashes.put(sectionKey, hashes[i]);
+            if (!acknowledgedSectionHashes.containsKey(sectionKey)) {
+                acknowledgedSectionHashes.put(sectionKey, hashes[i]);
             }
+        }
+        return true;
+    }
+
+    public synchronized StreamSession beginSession(Identifier dimension, boolean manifestRequired,
+                                                   long deadlineTick) {
+        clearOutstandingLocked();
+        streamEpoch = nextPositive(streamEpoch);
+        nextBatchId = 0L;
+        activeDimension = dimension;
+        retryNotBeforeTick = 0L;
+        resetScanStateLocked();
+        if (manifestRequired) {
+            manifestRequestId = nextPositive(manifestRequestId);
+            awaitingManifestDim = dimension;
+            manifestDeadlineTick = deadlineTick;
+        } else {
+            awaitingManifestDim = null;
+        }
+        return new StreamSession(dimension, streamEpoch, manifestRequestId, manifestRequired);
+    }
+
+    public synchronized StreamSession currentSession() {
+        return new StreamSession(activeDimension, streamEpoch, manifestRequestId, awaitingManifestDim != null);
+    }
+
+    public synchronized void recordManifestArea(int x, int z, int radius) {
+        manifestCenterX = x;
+        manifestCenterZ = z;
+        manifestRadius = radius;
+    }
+
+    public synchronized boolean needsManifestRefresh(int x, int z, int radius, long tick) {
+        if (awaitingManifestDim != null && tick < manifestDeadlineTick) return false;
+        int threshold = Math.max(4, radius >> 1);
+        return manifestRadius != radius
+                || Math.abs((long) x - manifestCenterX) >= threshold
+                || Math.abs((long) z - manifestCenterZ) >= threshold;
+    }
+
+    public synchronized StreamSession refreshManifest(long deadlineTick) {
+        manifestRequestId = nextPositive(manifestRequestId);
+        awaitingManifestDim = activeDimension;
+        manifestDeadlineTick = deadlineTick;
+        return currentSession();
+    }
+
+    public synchronized void deferDirtySection(long compositeKey, long sectionKey) {
+        if (deferredDirtySections.size() < 4096 || deferredDirtySections.containsKey(compositeKey)) {
+            deferredDirtySections.put(compositeKey, sectionKey);
+        } else {
+            resetScanStateLocked();
         }
     }
 
+    public synchronized long pollDeferredDirtySection() {
+        var iterator = deferredDirtySections.entrySet().iterator();
+        while (iterator.hasNext()) {
+            var entry = iterator.next();
+            if (sectionOwners.containsKey(entry.getKey())) continue;
+            long key = entry.getValue();
+            iterator.remove();
+            return key;
+        }
+        return NO_SECTION_KEY;
+    }
+
+    public synchronized boolean hasDeferredDirtySections() {
+        return !deferredDirtySections.isEmpty();
+    }
+
+    public synchronized Delivery reserveBatch(Identifier dimension, long expectedEpoch,
+                                              long[] sectionKeys, long[] hashes, int bytes, long tick) {
+        if (!dimension.equals(activeDimension) || expectedEpoch != streamEpoch) return null;
+        if (sectionKeys.length == 0 || sectionKeys.length != hashes.length || bytes <= 0) return null;
+        if (outstandingBatches.size() >= MAX_OUTSTANDING_BATCHES
+                || outstandingSections + sectionKeys.length > MAX_OUTSTANDING_SECTIONS
+                || outstandingBytes + bytes > MAX_OUTSTANDING_BYTES) return null;
+        for (long sectionKey : sectionKeys) {
+            if (sectionOwners.containsKey(sectionKey)) return null;
+        }
+        long batchId = nextPositive(nextBatchId);
+        nextBatchId = batchId;
+        outstandingBatches.put(batchId, new OutstandingBatch(sectionKeys, hashes, bytes, tick));
+        for (long sectionKey : sectionKeys) {
+            sectionOwners.put(sectionKey, batchId);
+        }
+        outstandingSections += sectionKeys.length;
+        outstandingBytes += bytes;
+        return new Delivery(streamEpoch, batchId);
+    }
+
+    public synchronized boolean completeBatch(long epoch, long batchId, boolean success, long tick) {
+        if (epoch != streamEpoch) return false;
+        OutstandingBatch batch = outstandingBatches.remove(batchId);
+        if (batch == null) return false;
+        releaseBatchLocked(batchId, batch);
+        if (success) {
+            for (int i = 0; i < batch.sectionKeys.length; i++) {
+                acknowledgedSectionHashes.put(batch.sectionKeys[i], batch.hashes[i]);
+            }
+        } else {
+            retryNotBeforeTick = Math.max(retryNotBeforeTick, tick + 100L);
+            resetScanStateLocked();
+        }
+        return true;
+    }
+
+    public synchronized boolean hasTimedOutBatch(long tick, long timeoutTicks) {
+        for (OutstandingBatch batch : outstandingBatches.values()) {
+            if (tick - batch.createdTick >= timeoutTicks) return true;
+        }
+        return false;
+    }
+
+    public synchronized int remainingSectionCredit() {
+        return Math.max(0, MAX_OUTSTANDING_SECTIONS - outstandingSections);
+    }
+
+    public synchronized long streamEpoch() {
+        return streamEpoch;
+    }
+
+    public synchronized boolean isCurrentDelivery(Identifier dimension, long epoch) {
+        return dimension.equals(activeDimension) && epoch == streamEpoch;
+    }
+
+    public synchronized boolean isBackedOff(long tick) {
+        return tick < retryNotBeforeTick;
+    }
+
+    public synchronized void deferRetry(long tick) {
+        retryNotBeforeTick = Math.max(retryNotBeforeTick, tick + 20L);
+    }
+
+    public synchronized boolean completeManifest(Identifier dimension, long epoch, long requestId) {
+        if (!matchesManifestLocked(dimension, epoch, requestId)) return false;
+        awaitingManifestDim = null;
+        retryNotBeforeTick = 0L;
+        return true;
+    }
+
+    public synchronized boolean failManifest(Identifier dimension, long epoch, long requestId) {
+        if (!matchesManifestLocked(dimension, epoch, requestId)) return false;
+        awaitingManifestDim = null;
+        resetScanStateLocked();
+        return true;
+    }
+
     public synchronized void reset() {
-        sentSectionHashes.clear();
+        acknowledgedSectionHashes.clear();
+        clearOutstandingLocked();
+        awaitingManifestDim = null;
+        retryNotBeforeTick = 0L;
         resetScanStateLocked();
     }
 
@@ -84,22 +263,7 @@ public class PlayerLodTracker {
     }
 
     public synchronized void invalidate(long sectionKey) {
-        sentSectionHashes.remove(sectionKey);
-    }
-
-    public synchronized void beginManifestWait(Identifier dimension, long deadlineTick) {
-        this.awaitingManifestDim = dimension;
-        this.manifestDeadlineTick = deadlineTick;
-    }
-
-    public synchronized void clearManifestWait() {
-        this.awaitingManifestDim = null;
-    }
-
-    public synchronized void completeManifestWait(Identifier dimension) {
-        if (dimension.equals(this.awaitingManifestDim)) {
-            this.awaitingManifestDim = null;
-        }
+        acknowledgedSectionHashes.remove(sectionKey);
     }
 
     // true if the scan should be gated waiting for this dims manifest. opens the gate once the deadline passes
@@ -124,7 +288,6 @@ public class PlayerLodTracker {
     public void updatePosition(ServerPlayer player) {
         this.lastChunkX = player.getBlockX() >> 4;
         this.lastChunkZ = player.getBlockZ() >> 4;
-        this.activeDimension = player.level().dimension().identifier();
     }
 
     public void setActiveDimension(Identifier dimension) {
@@ -136,7 +299,36 @@ public class PlayerLodTracker {
     }
 
     public synchronized int sentCount() {
-        return sentSectionHashes.size();
+        return acknowledgedSectionHashes.size();
+    }
+
+    private boolean matchesManifestLocked(Identifier dimension, long epoch, long requestId) {
+        return awaitingManifestDim != null
+                && awaitingManifestDim.equals(dimension)
+                && streamEpoch == epoch
+                && manifestRequestId == requestId;
+    }
+
+    private void clearOutstandingLocked() {
+        deferredDirtySections.clear();
+        outstandingBatches.clear();
+        sectionOwners.clear();
+        outstandingBytes = 0L;
+        outstandingSections = 0;
+    }
+
+    private void releaseBatchLocked(long batchId, OutstandingBatch batch) {
+        for (long sectionKey : batch.sectionKeys) {
+            if (sectionOwners.get(sectionKey) == batchId) {
+                sectionOwners.remove(sectionKey);
+            }
+        }
+        outstandingSections -= batch.sectionKeys.length;
+        outstandingBytes -= batch.bytes;
+    }
+
+    private static long nextPositive(long value) {
+        return value == Long.MAX_VALUE ? 1L : value + 1L;
     }
 
     public synchronized boolean prepareScan(int centerSecX, int centerSecZ,

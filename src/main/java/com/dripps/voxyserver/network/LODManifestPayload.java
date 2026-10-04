@@ -6,15 +6,20 @@ import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.Identifier;
 
 // client to server manifest of sections it already stores for a dimension
-// keys and hashes are parallel arrays. complete marks the final chunk
 public record LODManifestPayload(
         Identifier dimension,
+        long streamEpoch,
+        long requestId,
         long[] keys,
         long[] hashes,
-        boolean complete
+        int status
 ) implements CustomPacketPayload {
 
     public static final int MAX_ENTRIES = 4096;
+    public static final int PART = 0;
+    public static final int COMPLETE = 1;
+    public static final int FAILED = 2;
+    public static final int CANCELED = 3;
 
     public static final Type<LODManifestPayload> TYPE =
             new Type<>(Identifier.parse("voxyserver:lod_manifest"));
@@ -24,10 +29,12 @@ public record LODManifestPayload(
 
     private static void write(RegistryFriendlyByteBuf buf, LODManifestPayload payload) {
         if (payload.keys.length != payload.hashes.length || payload.keys.length > MAX_ENTRIES) {
-            throw new IllegalArgumentException("invalid LOD manifest payload size");
+            throw new IllegalArgumentException("invalid manifest payload size");
         }
         buf.writeIdentifier(payload.dimension);
-        buf.writeBoolean(payload.complete);
+        buf.writeVarLong(payload.streamEpoch);
+        buf.writeVarLong(payload.requestId);
+        buf.writeByte(payload.status);
         int count = payload.keys.length;
         buf.writeVarInt(count);
         for (int i = 0; i < count; i++) {
@@ -38,10 +45,13 @@ public record LODManifestPayload(
 
     private static LODManifestPayload read(RegistryFriendlyByteBuf buf) {
         Identifier dimension = buf.readIdentifier();
-        boolean complete = buf.readBoolean();
+        long streamEpoch = buf.readVarLong();
+        long requestId = buf.readVarLong();
+        int status = buf.readByte() & 0xFF;
         int count = buf.readVarInt();
-        if (count < 0 || count > MAX_ENTRIES) {
-            throw new IllegalArgumentException("invalid LOD manifest payload size: " + count);
+        if (streamEpoch < 0L || requestId < 0L || status < PART || status > CANCELED
+                || count < 0 || count > MAX_ENTRIES) {
+            throw new IllegalArgumentException("invalid manifest payload size: " + count);
         }
         long[] keys = new long[count];
         long[] hashes = new long[count];
@@ -49,7 +59,7 @@ public record LODManifestPayload(
             keys[i] = buf.readLong();
             hashes[i] = buf.readLong();
         }
-        return new LODManifestPayload(dimension, keys, hashes, complete);
+        return new LODManifestPayload(dimension, streamEpoch, requestId, keys, hashes, status);
     }
 
     @Override

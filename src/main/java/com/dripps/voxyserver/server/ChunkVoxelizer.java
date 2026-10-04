@@ -39,7 +39,7 @@ public class ChunkVoxelizer {
         this.engine = engine;
         this.streamingService = streamingService;
         this.generateOnChunkLoad = config.generateOnChunkLoad;
-        this.ingestOnChunkUnload = !config.dirtyTrackingEnabled;
+        this.ingestOnChunkUnload = config.generateOnChunkUnload && !config.dirtyTrackingEnabled;
     }
 
     public void register() {

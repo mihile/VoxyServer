@@ -2,8 +2,6 @@ package com.dripps.voxyserver.server;
 
 import com.dripps.voxyserver.Voxyserver;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
-import me.cortex.voxy.commonImpl.importers.IDataImporter;
-import me.cortex.voxy.commonImpl.importers.WorldImporter;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
@@ -48,33 +46,26 @@ public class WorldImportCoordinator {
             }
 
             int done = active.processedChunks.get();
-            int total = Math.max(done, active.estimatedChunks.get());
             long elapsedMs = Math.max(1L, System.currentTimeMillis() - active.startedAtMs);
             double cps = active.cps;
-            int remaining = total - done;
-            double cumulativeCps = done / (elapsedMs / 1000.0);
-            long etaMs = cumulativeCps > 0 ? (long) (remaining / cumulativeCps * 1000) : -1L;
 
             String base = "running "
                     + active.dimensionId
                     + " "
                     + done
-                    + "/"
-                    + total
                     + " chunks"
                     + " at " + String.format("%.1f", cps) + " c/s"
                     + " in "
-                    + formatDuration(elapsedMs)
-                    + (etaMs >= 0 ? " ETA " + formatDuration(etaMs) : "");
+                    + formatDuration(elapsedMs);
 
             if (queued > 0) {
                 base += ", " + queued + " queued";
             }
-            return base;
+            return base + "; " + active.importer.summary();
         }
     }
 
-    public boolean startAll(CommandSourceStack source) {
+    public boolean startAll(CommandSourceStack source, boolean force) {
         MinecraftServer server = source.getServer();
         List<ImportRequest> requests = new ArrayList<>();
 
@@ -83,7 +74,7 @@ public class WorldImportCoordinator {
             if (!Files.isDirectory(regionPath)) {
                 continue;
             }
-            requests.add(new ImportRequest(server, level, regionPath, source));
+            requests.add(new ImportRequest(server, level, regionPath, source, force));
         }
 
         if (requests.isEmpty()) {
@@ -98,7 +89,7 @@ public class WorldImportCoordinator {
 
         long runId;
         synchronized (this.lock) {
-            if (this.activeImport != null) {
+            if (this.activeImport != null || this.activeRunId != 0L) {
                 source.sendFailure(Component.literal("an import is already running"));
                 return false;
             }
@@ -113,15 +104,15 @@ public class WorldImportCoordinator {
         return true;
     }
 
-    public boolean startCurrent(CommandSourceStack source) {
+    public boolean startCurrent(CommandSourceStack source, boolean force) {
         if (!(source.getEntity() instanceof net.minecraft.server.level.ServerPlayer player)) {
             source.sendFailure(Component.literal("current can only be used by a player"));
             return false;
         }
-        return this.startDimension(source, player.level());
+        return this.startDimension(source, player.level(), force);
     }
 
-    public boolean startDimension(CommandSourceStack source, ServerLevel level) {
+    public boolean startDimension(CommandSourceStack source, ServerLevel level, boolean force) {
         MinecraftServer server = source.getServer();
         Path regionPath = getRegionPath(server, level);
         if (!Files.isDirectory(regionPath)) {
@@ -131,14 +122,14 @@ public class WorldImportCoordinator {
 
         long runId;
         synchronized (this.lock) {
-            if (this.activeImport != null) {
+            if (this.activeImport != null || this.activeRunId != 0L) {
                 source.sendFailure(Component.literal("an import is already running"));
                 return false;
             }
             runId = this.nextRunId++;
             this.activeRunId = runId;
             this.queue.clear();
-            this.queue.addLast(new ImportRequest(server, level, regionPath, source));
+            this.queue.addLast(new ImportRequest(server, level, regionPath, source, force));
         }
 
         source.sendSuccess(() -> Component.literal("queued import for " + level.dimension().identifier()), true);
@@ -215,13 +206,8 @@ public class WorldImportCoordinator {
             return;
         }
 
-        WorldImporter importer = new WorldImporter(
-                world,
-                request.level,
-                this.engine.getServiceManager(),
-                this.engine.savingServiceRateLimiter
-        );
-        importer.importRegionDirectoryAsync(request.regionPath.toFile());
+        ResumableWorldImporter importer = new ResumableWorldImporter(
+                world, request.level, request.regionPath, this.engine.importCheckpointPath(worldId), request.force);
 
         ActiveImport active = new ActiveImport(request, importer);
         synchronized (this.lock) {
@@ -239,7 +225,6 @@ public class WorldImportCoordinator {
         importer.runImport(
                 (finished, outOf) -> {
                     active.processedChunks.set(finished);
-                    active.estimatedChunks.set(outOf);
 
                     if (com.dripps.voxyserver.util.ServerStatsTracker.INSTANCE != null) {
                         com.dripps.voxyserver.util.ServerStatsTracker.INSTANCE.markVoxelized();
@@ -256,28 +241,22 @@ public class WorldImportCoordinator {
                     active.lastSnapshotChunks = finished;
                     active.lastUpdateMs = now;
 
-                    int total = Math.max(finished, outOf);
-                    int remaining = total - finished;
-                    double cumulativeCps = finished / Math.max(1.0, (now - active.startedAtMs) / 1000.0);
-                    long etaMs = cumulativeCps > 0 ? (long) (remaining / cumulativeCps * 1000) : -1L;
                     String cpsStr = String.format("%.1f", cps);
-                    String etaStr = etaMs >= 0 ? " ETA " + formatDuration(etaMs) : "";
+                    String regions = active.importer.summary();
 
                     request.server.execute(() -> {
                         String msg = "importing "
                                 + active.dimensionId
                                 + " "
                                 + finished
-                                + "/"
-                                + total
                                 + " chunks at "
                                 + cpsStr
                                 + " c/s"
-                                + etaStr;
+                                + "; " + regions;
                         sendSuccess(request.source, msg);
                     });
                 },
-                total -> request.server.execute(() -> this.onImportFinished(runId, active, request, true, total))
+                total -> request.server.execute(() -> this.onImportFinished(runId, active, request, importer.isSuccessful(), total))
         );
     }
 
@@ -296,7 +275,7 @@ public class WorldImportCoordinator {
                     + request.dimensionId
                     + " with "
                     + totalChunks
-                    + " chunks";
+                    + " chunks; " + active.importer.summary();
             sendSuccess(request.source, msg);
             this.startNext(runId);
             return;
@@ -306,7 +285,8 @@ public class WorldImportCoordinator {
             String msg = "import cancelled for " + request.dimensionId;
             sendSuccess(request.source, msg);
         } else {
-            String msg = "import ended early for " + request.dimensionId;
+            String msg = "import ended early for " + request.dimensionId
+                    + (active == null ? "" : "; " + active.importer.summary());
             sendFailure(request.source, msg);
         }
 
@@ -347,28 +327,29 @@ public class WorldImportCoordinator {
         private final Path regionPath;
         private final CommandSourceStack source;
         private final String dimensionId;
+        private final boolean force;
 
-        private ImportRequest(MinecraftServer server, ServerLevel level, Path regionPath, CommandSourceStack source) {
+        private ImportRequest(MinecraftServer server, ServerLevel level, Path regionPath, CommandSourceStack source, boolean force) {
             this.server = server;
             this.level = level;
             this.regionPath = regionPath;
             this.source = source;
+            this.force = force;
             this.dimensionId = level.dimension().identifier().toString().toLowerCase(Locale.ROOT);
         }
     }
 
     private static final class ActiveImport {
-        private final WorldImporter importer;
+        private final ResumableWorldImporter importer;
         private final String dimensionId;
         private final long startedAtMs;
         private final AtomicInteger processedChunks = new AtomicInteger();
-        private final AtomicInteger estimatedChunks = new AtomicInteger();
         private volatile long lastUpdateMs;
         private volatile int lastSnapshotChunks;
         private volatile double cps;
         private volatile boolean cancelled;
 
-        private ActiveImport(ImportRequest request, WorldImporter importer) {
+        private ActiveImport(ImportRequest request, ResumableWorldImporter importer) {
             this.importer = importer;
             this.dimensionId = request.dimensionId;
             this.startedAtMs = System.currentTimeMillis();
