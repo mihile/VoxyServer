@@ -55,10 +55,10 @@ dependencies {
 
     implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
-    implementation files("libs/voxy-26.2.jar")
-    compileOnly "maven.modrinth:sodium:mc26.2-0.9.1-fabric"
-    compileOnly "maven.modrinth:modmenu:20.0.0"
-    compileOnly "me.shedaniel.cloth:cloth-config-fabric:26.2.155"
+    implementation files("libs/voxy-26.3.jar")
+    compileOnly "maven.modrinth:sodium:mc26.3-0.9.2-fabric"
+    compileOnly "maven.modrinth:modmenu:21.0.0-beta.1"
+    compileOnly "me.shedaniel.cloth:cloth-config-fabric:26.3.159"
 
     // lwjgl is bundled with the client but not the dedicated server
     // voxy's Mapper uses MemoryUtil for off-heap allocation

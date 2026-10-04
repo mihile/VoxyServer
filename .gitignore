@@ -11,4 +11,5 @@ bin/
 voxy/
 voxy_old/
 /voxy-12111/
+voxy-*
 libs/
