@@ -4,7 +4,9 @@
   "version": "${version}",
   "name": "VoxyServer",
   "description": "",
-  "authors": ["dripps"],
+  "authors": [
+    "dripps"
+  ],
   "contact": {
     "homepage": "https://modrinth.com/mod/voxyserver",
     "issues": "https://github.com/poosmacker/voxyserver/issues",
@@ -42,8 +44,11 @@
   "depends": {
     "fabricloader": ">=${loader_version}",
     "fabric-api": "*",
-    "minecraft": ["~${minecraft_version}"],
-    "voxy": "*"
+    "minecraft": [
+      "${minecraft_version}"
+    ],
+    "voxy": "*",
+    "java": ">=17"
   },
   "suggests": {
     "modmenu": "*",

@@ -1,34 +1,32 @@
 package com.dripps.voxyserver.network;
 
-import net.minecraft.network.RegistryFriendlyByteBuf;
-import net.minecraft.network.codec.StreamCodec;
-import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
-import net.minecraft.resources.Identifier;
+import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.resources.ResourceLocation;
 
 import java.util.ArrayList;
 import java.util.List;
 
 // batch of lod sections sent together for efficiency
 public record LODBulkPayload(
-        Identifier dimension,
+        ResourceLocation dimension,
         List<LODSectionPayload> sections
-) implements CustomPacketPayload {
+) implements LodPayload {
 
     public static final int MAX_SECTIONS = PreSerializedLodPayload.MAX_SECTIONS;
     public static final int MAX_LUT_ENTRIES = 32_768;
     public static final int MAX_INDEX_ENTRIES = 32_768;
 
     public static final Type<LODBulkPayload> TYPE =
-            new Type<>(Identifier.parse("voxyserver:lod_bulk"));
+            new Type<>(new ResourceLocation("voxyserver:lod_bulk"));
 
-    public static final StreamCodec<RegistryFriendlyByteBuf, LODBulkPayload> CODEC =
-            StreamCodec.of(LODBulkPayload::write, LODBulkPayload::read);
+    public static final PacketCodec<FriendlyByteBuf, LODBulkPayload> CODEC =
+            PacketCodec.of(LODBulkPayload::write, LODBulkPayload::read);
 
-    private static void write(RegistryFriendlyByteBuf buf, LODBulkPayload payload) {
+    private static void write(FriendlyByteBuf buf, LODBulkPayload payload) {
         if (payload.sections.isEmpty() || payload.sections.size() > MAX_SECTIONS) {
             throw new IllegalArgumentException("invalid bulk section count");
         }
-        buf.writeIdentifier(payload.dimension);
+        buf.writeResourceLocation(payload.dimension);
         buf.writeVarInt(payload.sections.size());
         for (LODSectionPayload section : payload.sections) {
             buf.writeLong(section.sectionKey());
@@ -60,8 +58,8 @@ public record LODBulkPayload(
         }
     }
 
-    private static LODBulkPayload read(RegistryFriendlyByteBuf buf) {
-        Identifier dimension = buf.readIdentifier();
+    private static LODBulkPayload read(FriendlyByteBuf buf) {
+        ResourceLocation dimension = buf.readResourceLocation();
         int count = buf.readVarInt();
         if (count < 1 || count > MAX_SECTIONS) {
             throw new IllegalArgumentException("invalid bulk section count: " + count);
@@ -104,7 +102,7 @@ public record LODBulkPayload(
     }
 
     @Override
-    public Type<? extends CustomPacketPayload> type() {
+    public Type<? extends LodPayload> type() {
         return TYPE;
     }
 }

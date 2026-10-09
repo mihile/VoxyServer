@@ -17,7 +17,7 @@ import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.registries.Registries;
-import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
@@ -38,20 +38,20 @@ public final class RemoteIngestService {
 
     private final ThreadPoolExecutor executor;
     private final AtomicLong generation = new AtomicLong();
-    private volatile Identifier activeDimension;
+    private volatile ResourceLocation activeDimension;
     private volatile long activeEpoch;
     private volatile boolean live = true;
 
     private final class IngestTask implements Runnable {
         private final WorldIdentifier worldId;
-        private final Identifier dimension;
+        private final ResourceLocation dimension;
         private final PreSerializedLodPayload raw;
         private final RegistryAccess registryAccess;
         private final long taskGeneration;
         private final Consumer<LODBatchResultPayload> completion;
         private final AtomicBoolean completed = new AtomicBoolean();
 
-        private IngestTask(WorldIdentifier worldId, Identifier dimension,
+        private IngestTask(WorldIdentifier worldId, ResourceLocation dimension,
                            PreSerializedLodPayload raw, RegistryAccess registryAccess,
                            long taskGeneration, Consumer<LODBatchResultPayload> completion) {
             this.worldId = worldId;
@@ -101,7 +101,7 @@ public final class RemoteIngestService {
         );
     }
 
-    public boolean enqueueIngest(WorldIdentifier worldId, Identifier dimension,
+    public boolean enqueueIngest(WorldIdentifier worldId, ResourceLocation dimension,
                                  PreSerializedLodPayload raw, RegistryAccess registryAccess,
                                  Consumer<LODBatchResultPayload> completion) {
         if (!live || raw.streamEpoch() != activeEpoch || !Objects.equals(dimension, activeDimension)) {
@@ -117,7 +117,7 @@ public final class RemoteIngestService {
         }
     }
 
-    public void startSession(Identifier dimension, long epoch) {
+    public void startSession(ResourceLocation dimension, long epoch) {
         if (activeEpoch == epoch && Objects.equals(activeDimension, dimension)) return;
         activeDimension = dimension;
         activeEpoch = epoch;
@@ -233,12 +233,12 @@ public final class RemoteIngestService {
                 || blockStateIds.length != light.length) {
             throw new IllegalArgumentException("invalid lookup table");
         }
-        Registry<Biome> biomeRegistry = registryAccess.lookupOrThrow(Registries.BIOME);
+        Registry<Biome> biomeRegistry = registryAccess.registryOrThrow(Registries.BIOME);
         long[] remapped = new long[blockStateIds.length];
         for (int i = 0; i < blockStateIds.length; i++) {
             BlockState state = Block.BLOCK_STATE_REGISTRY.byId(blockStateIds[i]);
             int clientBlockId = state != null ? mapper.getIdForBlockState(state) : 0;
-            Optional<Holder.Reference<Biome>> biomeHolder = biomeRegistry.get(biomeIds[i]);
+            Optional<Holder.Reference<Biome>> biomeHolder = biomeRegistry.getHolder(biomeIds[i]);
             int clientBiomeId = biomeHolder.map(mapper::getIdForBiome).orElse(0);
             remapped[i] = Mapper.composeMappingId(light[i], clientBlockId, clientBiomeId);
         }

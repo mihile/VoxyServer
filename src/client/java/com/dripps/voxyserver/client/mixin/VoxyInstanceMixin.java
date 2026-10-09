@@ -14,7 +14,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-@Mixin(VoxyInstance.class)
+@Mixin(value = VoxyInstance.class, remap = false)
 public abstract class VoxyInstanceMixin implements IVoxyServerIngestAccess {
 
     @Unique
@@ -28,7 +28,7 @@ public abstract class VoxyInstanceMixin implements IVoxyServerIngestAccess {
 
     @Inject(method = "<init>()V", at = @At("RETURN"))
     private void voxyserver$init(CallbackInfo ci) {
-        Logger.info("startuig RemoteIngestService");
+        Logger.info("Starting RemoteIngestService");
         this.voxyserver$remoteIngestService = new RemoteIngestService(this.getServiceManager());
     }
 

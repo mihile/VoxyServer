@@ -1,34 +1,32 @@
 package com.dripps.voxyserver.network;
 
-import net.minecraft.network.RegistryFriendlyByteBuf;
-import net.minecraft.network.codec.StreamCodec;
-import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
-import net.minecraft.resources.Identifier;
+import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.resources.ResourceLocation;
 
 public record LODServerSettingsPayload(
         int maxLodStreamRadius,
         int maxSectionsPerTick
-) implements CustomPacketPayload {
+) implements LodPayload {
 
     public static final Type<LODServerSettingsPayload> TYPE =
-            new Type<>(Identifier.parse("voxyserver:lod_server_settings"));
+            new Type<>(new ResourceLocation("voxyserver:lod_server_settings"));
 
-    public static final StreamCodec<RegistryFriendlyByteBuf, LODServerSettingsPayload> CODEC =
-            StreamCodec.of(LODServerSettingsPayload::write, LODServerSettingsPayload::read);
+    public static final PacketCodec<FriendlyByteBuf, LODServerSettingsPayload> CODEC =
+            PacketCodec.of(LODServerSettingsPayload::write, LODServerSettingsPayload::read);
 
-    private static void write(RegistryFriendlyByteBuf buf, LODServerSettingsPayload payload) {
+    private static void write(FriendlyByteBuf buf, LODServerSettingsPayload payload) {
         buf.writeVarInt(payload.maxLodStreamRadius);
         buf.writeVarInt(payload.maxSectionsPerTick);
     }
 
-    private static LODServerSettingsPayload read(RegistryFriendlyByteBuf buf) {
+    private static LODServerSettingsPayload read(FriendlyByteBuf buf) {
         int maxLodStreamRadius = buf.readVarInt();
         int maxSectionsPerTick = buf.readVarInt();
         return new LODServerSettingsPayload(maxLodStreamRadius, maxSectionsPerTick);
     }
 
     @Override
-    public Type<? extends CustomPacketPayload> type() {
+    public Type<? extends LodPayload> type() {
         return TYPE;
     }
 }

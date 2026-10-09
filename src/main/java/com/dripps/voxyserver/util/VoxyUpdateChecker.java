@@ -37,7 +37,8 @@ public class VoxyUpdateChecker {
     }
 
     public static void checkForUpdates() {
-        if (FabricLoader.getInstance().getEnvironmentType() != EnvType.SERVER) {
+        if (getModVersion("voxyserver").contains("1.20.1-port")
+                || FabricLoader.getInstance().getEnvironmentType() != EnvType.SERVER) {
             return;
         }
         CompletableFuture.runAsync(() -> {

@@ -1,30 +1,28 @@
 package com.dripps.voxyserver.network;
 
-import net.minecraft.network.RegistryFriendlyByteBuf;
-import net.minecraft.network.codec.StreamCodec;
-import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
-import net.minecraft.resources.Identifier;
+import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.resources.ResourceLocation;
 
 // single level 0 LOD section sent from server to client
 // contains: dimension id, section position key, a LUT of vanilla registry ids, and an index array
 // contentHash is the canonical content fingerprint the client persists for hash sync
 public record LODSectionPayload(
-        Identifier dimension,
+        ResourceLocation dimension,
         long sectionKey,
         int[] lutBlockStateIds,
         int[] lutBiomeIds,
         byte[] lutLight,
         short[] indexArray,
         long contentHash
-) implements CustomPacketPayload {
+) implements LodPayload {
 
     public static final Type<LODSectionPayload> TYPE =
-            new Type<>(Identifier.parse("voxyserver:lod_section"));
+            new Type<>(new ResourceLocation("voxyserver:lod_section"));
 
-    public static final StreamCodec<RegistryFriendlyByteBuf, LODSectionPayload> CODEC =
-            StreamCodec.of(LODSectionPayload::write, LODSectionPayload::read);
+    public static final PacketCodec<FriendlyByteBuf, LODSectionPayload> CODEC =
+            PacketCodec.of(LODSectionPayload::write, LODSectionPayload::read);
 
-    private static void write(RegistryFriendlyByteBuf buf, LODSectionPayload payload) {
+    private static void write(FriendlyByteBuf buf, LODSectionPayload payload) {
         int lutLen = payload.lutBlockStateIds.length;
         if (lutLen < 1 || lutLen > LODBulkPayload.MAX_LUT_ENTRIES
                 || payload.lutBiomeIds.length != lutLen || payload.lutLight.length != lutLen
@@ -32,7 +30,7 @@ public record LODSectionPayload(
                 || payload.indexArray.length > LODBulkPayload.MAX_INDEX_ENTRIES) {
             throw new IllegalArgumentException("invalid section data");
         }
-        buf.writeIdentifier(payload.dimension);
+        buf.writeResourceLocation(payload.dimension);
         buf.writeLong(payload.sectionKey);
         buf.writeLong(payload.contentHash);
 
@@ -60,8 +58,8 @@ public record LODSectionPayload(
         }
     }
 
-    private static LODSectionPayload read(RegistryFriendlyByteBuf buf) {
-        Identifier dimension = buf.readIdentifier();
+    private static LODSectionPayload read(FriendlyByteBuf buf) {
+        ResourceLocation dimension = buf.readResourceLocation();
         long sectionKey = buf.readLong();
         long contentHash = buf.readLong();
 
@@ -99,7 +97,7 @@ public record LODSectionPayload(
     }
 
     @Override
-    public Type<? extends CustomPacketPayload> type() {
+    public Type<? extends LodPayload> type() {
         return TYPE;
     }
 }

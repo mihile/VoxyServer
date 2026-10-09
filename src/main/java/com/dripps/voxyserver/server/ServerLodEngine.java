@@ -10,10 +10,14 @@ import me.cortex.voxy.common.world.service.VoxelIngestService;
 import me.cortex.voxy.commonImpl.VoxyInstance;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
 import net.minecraft.core.SectionPos;
-import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.core.Holder;
+import net.minecraft.world.level.biome.Biome;
 
 import java.nio.file.Path;
 import java.util.Collections;
@@ -25,12 +29,12 @@ import java.util.concurrent.ConcurrentHashMap;
 public class ServerLodEngine extends VoxyInstance {
     @FunctionalInterface
     public interface DirtySectionListener {
-        void onSectionDirty(Identifier dimension, long sectionKey);
+        void onSectionDirty(ResourceLocation dimension, long sectionKey);
     }
 
     private final Path basePath;
     private final SectionSerializationStorage.Config storageConfig;
-    private final ConcurrentHashMap<WorldIdentifier, Identifier> dimensionsByWorld = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<WorldIdentifier, ResourceLocation> dimensionsByWorld = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<WorldIdentifier, StoredSectionPresenceIndex> presenceIndexes = new ConcurrentHashMap<>();
     private final Object ingestReferenceLock = new Object();
     private final Set<WorldEngine> ingestReferencedWorlds = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -57,10 +61,10 @@ public class ServerLodEngine extends VoxyInstance {
         if (worldId == null) {
             return null;
         }
-        return this.getOrCreate(worldId, level.dimension().identifier());
+        return this.getOrCreate(worldId, level.dimension().location());
     }
 
-    public WorldEngine getOrCreate(WorldIdentifier identifier, Identifier dimension) {
+    public WorldEngine getOrCreate(WorldIdentifier identifier, ResourceLocation dimension) {
         if (identifier == null || !this.isRunning()) {
             return null;
         }
@@ -171,14 +175,14 @@ public class ServerLodEngine extends VoxyInstance {
             var blockLight = lighting.getLayerListener(LightLayer.BLOCK);
             var skyLight = lighting.getLayerListener(LightLayer.SKY);
             var pos = chunk.getPos();
-            int sectionY = chunk.getMinSectionY();
+            int sectionY = chunk.getMinSection();
             for (var section : chunk.getSections()) {
                 var sectionPos = SectionPos.of(pos, sectionY++);
                 if (section == null) continue;
                 var block = blockLight.getDataLayerData(sectionPos);
                 var sky = skyLight.getDataLayerData(sectionPos);
                 if (block == null && sky == null && !section.hasOnlyAir()) return false;
-                if (!VoxelIngestService.rawIngest(world, section.copy(), pos.x(), sectionPos.y(), pos.z(),
+                if (!VoxelIngestService.rawIngest(world, new LevelChunkSection(section.getStates().copy(), ((PalettedContainer<Holder<Biome>>) section.getBiomes()).copy()), pos.x, sectionPos.y(), pos.z,
                         block == null ? null : block.copy(), sky == null ? null : sky.copy())) return false;
             }
             return true;
@@ -235,7 +239,7 @@ public class ServerLodEngine extends VoxyInstance {
             return;
         }
 
-        Identifier dimension = this.dimensionsByWorld.get(identifier);
+        ResourceLocation dimension = this.dimensionsByWorld.get(identifier);
         if (dimension == null) {
             return;
         }

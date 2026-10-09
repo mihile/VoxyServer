@@ -1,28 +1,26 @@
 package com.dripps.voxyserver.network;
 
-import net.minecraft.network.RegistryFriendlyByteBuf;
-import net.minecraft.network.codec.StreamCodec;
-import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
-import net.minecraft.resources.Identifier;
+import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.resources.ResourceLocation;
 
-public record LODProtocolPayload(int protocol) implements CustomPacketPayload {
+public record LODProtocolPayload(int protocol) implements LodPayload {
 
     public static final Type<LODProtocolPayload> TYPE =
-            new Type<>(Identifier.parse("voxyserver:lod_protocol"));
+            new Type<>(new ResourceLocation("voxyserver:lod_protocol"));
 
-    public static final StreamCodec<RegistryFriendlyByteBuf, LODProtocolPayload> CODEC =
-            StreamCodec.of(LODProtocolPayload::write, LODProtocolPayload::read);
+    public static final PacketCodec<FriendlyByteBuf, LODProtocolPayload> CODEC =
+            PacketCodec.of(LODProtocolPayload::write, LODProtocolPayload::read);
 
-    private static void write(RegistryFriendlyByteBuf buf, LODProtocolPayload payload) {
+    private static void write(FriendlyByteBuf buf, LODProtocolPayload payload) {
         buf.writeVarInt(payload.protocol);
     }
 
-    private static LODProtocolPayload read(RegistryFriendlyByteBuf buf) {
+    private static LODProtocolPayload read(FriendlyByteBuf buf) {
         return new LODProtocolPayload(buf.readVarInt());
     }
 
     @Override
-    public Type<? extends CustomPacketPayload> type() {
+    public Type<? extends LodPayload> type() {
         return TYPE;
     }
 }

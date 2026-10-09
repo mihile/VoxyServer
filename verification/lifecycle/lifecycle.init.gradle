@@ -1,0 +1,52 @@
+allprojects { afterEvaluate {
+    configurations.configureEach {
+        resolutionStrategy.eachDependency { details ->
+            if (details.requested.group == 'org.lwjgl' && details.requested.name != 'lwjgl-bom') details.useVersion('3.3.1')
+        }
+    }
+    dependencies {
+        modRuntimeOnly 'maven.modrinth:sodium:mc1.20.1-0.5.13-fabric'
+        runtimeOnly 'org.lwjgl:lwjgl-lmdb:3.3.1'
+        runtimeOnly 'org.lwjgl:lwjgl-lmdb:3.3.1:natives-windows'
+        runtimeOnly 'org.lwjgl:lwjgl-zstd:3.3.1'
+        runtimeOnly 'org.lwjgl:lwjgl-zstd:3.3.1:natives-windows'
+        runtimeOnly 'org.rocksdb:rocksdbjni:10.2.1'
+        runtimeOnly 'redis.clients:jedis:5.1.0'
+        runtimeOnly 'org.apache.commons:commons-pool2:2.12.0'
+        runtimeOnly 'org.lz4:lz4-java:1.8.0'
+        runtimeOnly 'org.tukaani:xz:1.10'
+        runtimeOnly 'org.xerial:sqlite-jdbc:3.49.1.0'
+    }
+    loom.runs.client {
+        runDir 'build/lifecycle-client'
+        vmArg '-Xmx2G'
+        programArg '--width'
+        programArg '854'
+        programArg '--height'
+        programArg '480'
+        programArg '--username'
+        programArg 'LifecycleTest'
+    }
+    def harnessCompile = tasks.register('compileLifecycleHarness', JavaCompile) {
+        dependsOn tasks.named('clientClasses')
+        source project.file('verification/lifecycle/harness/src/test/LifecycleHarness.java')
+        classpath = sourceSets.client.runtimeClasspath
+        destinationDirectory = layout.buildDirectory.dir('lifecycle-harness/classes')
+        options.release = 17
+    }
+    def harnessJar = tasks.register('lifecycleHarnessJar', Jar) {
+        dependsOn harnessCompile
+        archiveFileName = 'lifecycle-harness.jar'
+        destinationDirectory = layout.buildDirectory.dir('lifecycle-client/mods')
+        from harnessCompile
+        from project.file('verification/lifecycle/harness/resources')
+    }
+    tasks.named('runClient') { dependsOn harnessJar }
+    tasks.register('remapLifecycleHarness', tasks.named('remapJar').get().getClass().getSuperclass()) {
+        dependsOn harnessJar
+        inputFile = harnessJar.get().archiveFile
+        archiveFileName = 'lifecycle-harness.jar'
+        destinationDirectory = project.layout.buildDirectory.dir('lifecycle-production-client/mods')
+        addNestedDependencies = false
+    }
+} }

@@ -13,3 +13,7 @@ voxy_old/
 /voxy-12111/
 voxy-*
 libs/
+logs/
+*.log
+
+__pycache__/

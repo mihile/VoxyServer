@@ -12,8 +12,17 @@ import net.minecraft.nbt.NbtIo;
 import net.minecraft.nbt.NbtOps;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.chunk.DataLayer;
-import net.minecraft.world.level.chunk.PalettedContainerFactory;
-import net.minecraft.world.level.chunk.status.ChunkStatus;
+import com.mojang.serialization.Codec;
+import net.minecraft.core.Holder;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.biome.Biomes;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.PalettedContainerRO;
+import net.minecraft.world.level.chunk.ChunkStatus;
 import net.minecraft.world.level.chunk.storage.RegionFileVersion;
 
 import java.io.*;
@@ -27,7 +36,9 @@ final class ResumableWorldImporter {
     private final Path directory;
     private final RegionImportCheckpoint checkpoints;
     private final boolean force;
-    private final PalettedContainerFactory palettes;
+    private final Codec<PalettedContainer<BlockState>> blockCodec;
+    private final Codec<PalettedContainerRO<Holder<Biome>>> biomeCodec;
+    private final Holder<Biome> defaultBiome;
     private volatile boolean cancelled;
     private volatile boolean successful;
     private volatile Thread worker;
@@ -45,7 +56,12 @@ final class ResumableWorldImporter {
         this.directory = directory;
         this.checkpoints = new RegionImportCheckpoint(checkpointPath);
         this.force = force;
-        this.palettes = PalettedContainerFactory.create(level.registryAccess());
+        var biomeRegistry = level.registryAccess().registryOrThrow(Registries.BIOME);
+        this.defaultBiome = biomeRegistry.getHolderOrThrow(Biomes.PLAINS);
+        this.blockCodec = PalettedContainer.codecRW(Block.BLOCK_STATE_REGISTRY, BlockState.CODEC,
+                PalettedContainer.Strategy.SECTION_STATES, Blocks.AIR.defaultBlockState());
+        this.biomeCodec = PalettedContainer.codecRO(biomeRegistry.asHolderIdMap(), biomeRegistry.holderByNameCodec(),
+                PalettedContainer.Strategy.SECTION_BIOMES, defaultBiome);
     }
 
     synchronized void runImport(IDataImporter.IUpdateCallback update, IDataImporter.ICompletionCallback completion) {
@@ -169,28 +185,29 @@ final class ResumableWorldImporter {
     }
 
     private boolean importChunk(CompoundTag chunk, int x, int z, ImportSectionStorage storage) throws IOException {
-        String statusName = chunk.getStringOr("Status", "");
+        String statusName = chunk.getString("Status");
         var status = ChunkStatus.byName(statusName);
         if (status == null) throw new IOException("Missing or unknown chunk status at " + x + ", " + z);
         if (status != ChunkStatus.FULL && status != ChunkStatus.EMPTY) return false;
-        if (chunk.getIntOr("xPos", Integer.MIN_VALUE) != x || chunk.getIntOr("zPos", Integer.MIN_VALUE) != z) {
+        if ((chunk.contains("xPos", 99) ? chunk.getInt("xPos") : Integer.MIN_VALUE) != x || (chunk.contains("zPos", 99) ? chunk.getInt("zPos") : Integer.MIN_VALUE) != z) {
             throw new IOException("Chunk position mismatch at " + x + ", " + z);
         }
         Map<Integer, CompoundTag> sections = new HashMap<>();
-        for (var tag : chunk.getList("sections").orElseThrow(() -> new IOException("Missing chunk sections"))) {
+        if (!chunk.contains("sections", 9)) throw new IOException("Missing chunk sections");
+        for (var tag : chunk.getList("sections", 10)) {
             if (!(tag instanceof CompoundTag section)) throw new IOException("Invalid chunk section");
-            int y = section.getIntOr("Y", Integer.MIN_VALUE);
+            int y = (section.contains("Y", 99) ? section.getInt("Y") : Integer.MIN_VALUE);
             if (y == Integer.MIN_VALUE || sections.put(y, section) != null) throw new IOException("Invalid section Y");
         }
-        for (int y = level.getMinSectionY(); y <= level.getMaxSectionY(); y++) {
+        for (int y = level.getMinSection(); y < level.getMaxSection(); y++) {
             checkCancelled();
             CompoundTag section = sections.getOrDefault(y, new CompoundTag());
-            var blocks = section.getCompound("block_states").isPresent()
-                    ? palettes.blockStatesContainerCodec().parse(NbtOps.INSTANCE, section.getCompound("block_states").orElseThrow()).getOrThrow()
-                    : palettes.createForBlockStates();
-            var biomes = section.getCompound("biomes").isPresent()
-                    ? palettes.biomeContainerCodec().parse(NbtOps.INSTANCE, section.getCompound("biomes").orElseThrow()).getOrThrow()
-                    : palettes.createForBiomes();
+            var blocks = section.contains("block_states", 10)
+                    ? blockCodec.parse(NbtOps.INSTANCE, section.getCompound("block_states")).result().orElseThrow(() -> new IOException("Invalid section palette"))
+                    : new PalettedContainer<>(Block.BLOCK_STATE_REGISTRY, Blocks.AIR.defaultBlockState(), PalettedContainer.Strategy.SECTION_STATES);
+            var biomes = section.contains("biomes", 10)
+                    ? biomeCodec.parse(NbtOps.INSTANCE, section.getCompound("biomes")).result().orElseThrow(() -> new IOException("Invalid section palette"))
+                    : new PalettedContainer<>(level.registryAccess().registryOrThrow(Registries.BIOME).asHolderIdMap(), defaultBiome, PalettedContainer.Strategy.SECTION_BIOMES);
             var blockLight = light(section, "BlockLight");
             var skyLight = light(section, "SkyLight");
             var voxelized = WorldConversionFactory.convert(VoxelizedSection.createEmpty().setPosition(x, y, z),
@@ -209,7 +226,7 @@ final class ResumableWorldImporter {
     }
 
     private static DataLayer light(CompoundTag section, String key) {
-        byte[] bytes = section.getByteArray(key).orElse(new byte[0]);
+        byte[] bytes = section.getByteArray(key);
         return bytes.length == 0 ? null : new DataLayer(bytes);
     }
 

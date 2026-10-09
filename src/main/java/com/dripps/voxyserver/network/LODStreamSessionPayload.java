@@ -1,29 +1,27 @@
 package com.dripps.voxyserver.network;
 
-import net.minecraft.network.RegistryFriendlyByteBuf;
-import net.minecraft.network.codec.StreamCodec;
-import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
-import net.minecraft.resources.Identifier;
+import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.resources.ResourceLocation;
 
-public record LODStreamSessionPayload(Identifier dimension, long streamEpoch,
+public record LODStreamSessionPayload(ResourceLocation dimension, long streamEpoch,
                                       long manifestRequestId, boolean manifestRequired)
-        implements CustomPacketPayload {
+        implements LodPayload {
 
     public static final Type<LODStreamSessionPayload> TYPE =
-            new Type<>(Identifier.parse("voxyserver:lod_stream_session"));
+            new Type<>(new ResourceLocation("voxyserver:lod_stream_session"));
 
-    public static final StreamCodec<RegistryFriendlyByteBuf, LODStreamSessionPayload> CODEC =
-            StreamCodec.of(LODStreamSessionPayload::write, LODStreamSessionPayload::read);
+    public static final PacketCodec<FriendlyByteBuf, LODStreamSessionPayload> CODEC =
+            PacketCodec.of(LODStreamSessionPayload::write, LODStreamSessionPayload::read);
 
-    private static void write(RegistryFriendlyByteBuf buf, LODStreamSessionPayload payload) {
-        buf.writeIdentifier(payload.dimension);
+    private static void write(FriendlyByteBuf buf, LODStreamSessionPayload payload) {
+        buf.writeResourceLocation(payload.dimension);
         buf.writeVarLong(payload.streamEpoch);
         buf.writeVarLong(payload.manifestRequestId);
         buf.writeBoolean(payload.manifestRequired);
     }
 
-    private static LODStreamSessionPayload read(RegistryFriendlyByteBuf buf) {
-        Identifier dimension = buf.readIdentifier();
+    private static LODStreamSessionPayload read(FriendlyByteBuf buf) {
+        ResourceLocation dimension = buf.readResourceLocation();
         long streamEpoch = buf.readVarLong();
         long manifestRequestId = buf.readVarLong();
         boolean manifestRequired = buf.readBoolean();
@@ -34,7 +32,7 @@ public record LODStreamSessionPayload(Identifier dimension, long streamEpoch,
     }
 
     @Override
-    public Type<? extends CustomPacketPayload> type() {
+    public Type<? extends LodPayload> type() {
         return TYPE;
     }
 }

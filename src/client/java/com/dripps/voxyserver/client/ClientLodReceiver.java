@@ -16,12 +16,12 @@ import me.cortex.voxy.commonImpl.VoxyInstance;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
-import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
+import com.dripps.voxyserver.client.ClientLodNetworking;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.network.chat.Component;
-import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceLocation;
 
 import java.util.ArrayDeque;
 import java.util.Objects;
@@ -38,7 +38,7 @@ public final class ClientLodReceiver {
     private static int reservedBatches;
     private static long reservedBytes;
     private static volatile long networkEpoch;
-    private static volatile Identifier networkDimension;
+    private static volatile ResourceLocation networkDimension;
 
     private static final class Inbound {
         private final PreSerializedLodPayload payload;
@@ -60,8 +60,8 @@ public final class ClientLodReceiver {
             networkDimension = null;
             clearQueuedInbound(false);
             ClientLodSettings.prepareForCurrentConnection();
-            if (ClientPlayNetworking.canSend(LODHandshakePayload.TYPE)) {
-                ClientPlayNetworking.send(new LODHandshakePayload(VoxyServerNetworking.PROTOCOL_VERSION));
+            if (ClientLodNetworking.canSend(LODHandshakePayload.TYPE)) {
+                ClientLodNetworking.send(new LODHandshakePayload(VoxyServerNetworking.PROTOCOL_VERSION));
             }
         });
 
@@ -76,7 +76,7 @@ public final class ClientLodReceiver {
             ClientLodHashStore.get().flush();
         });
 
-        ClientPlayNetworking.registerGlobalReceiver(LODProtocolPayload.TYPE, (payload, context) ->
+        ClientLodNetworking.registerGlobalReceiver(LODProtocolPayload.TYPE, (payload, context) ->
                 context.client().execute(() -> {
                     int serverProtocol = payload.protocol();
                     int clientProtocol = VoxyServerNetworking.PROTOCOL_VERSION;
@@ -89,14 +89,14 @@ public final class ClientLodReceiver {
                     }
                 }));
 
-        ClientPlayNetworking.registerGlobalReceiver(LODServerSettingsPayload.TYPE, (payload, context) ->
+        ClientLodNetworking.registerGlobalReceiver(LODServerSettingsPayload.TYPE, (payload, context) ->
                 context.client().execute(() -> ClientLodSettings.applyServerSettings(
                         payload.maxLodStreamRadius(), payload.maxSectionsPerTick())));
 
-        ClientPlayNetworking.registerGlobalReceiver(LODHashSyncSettingsPayload.TYPE, (payload, context) ->
+        ClientLodNetworking.registerGlobalReceiver(LODHashSyncSettingsPayload.TYPE, (payload, context) ->
                 context.client().execute(() -> ClientLodSettings.applyHashSyncSettings(payload.enabled())));
 
-        ClientPlayNetworking.registerGlobalReceiver(LODStreamSessionPayload.TYPE, (payload, context) -> {
+        ClientLodNetworking.registerGlobalReceiver(LODStreamSessionPayload.TYPE, (payload, context) -> {
             boolean changed = networkEpoch != payload.streamEpoch()
                     || !Objects.equals(networkDimension, payload.dimension());
             networkEpoch = payload.streamEpoch();
@@ -109,7 +109,7 @@ public final class ClientLodReceiver {
             });
         });
 
-        ClientPlayNetworking.registerGlobalReceiver(PreSerializedLodPayload.TYPE, (payload, context) -> {
+        ClientLodNetworking.registerGlobalReceiver(PreSerializedLodPayload.TYPE, (payload, context) -> {
             if (!ClientLodSettings.isProtocolOk()
                     || payload.streamEpoch() != networkEpoch
                     || networkDimension == null) {
@@ -128,7 +128,7 @@ public final class ClientLodReceiver {
             scheduleDrain(context.client());
         });
 
-        ClientPlayNetworking.registerGlobalReceiver(LODClearPayload.TYPE, (payload, context) ->
+        ClientLodNetworking.registerGlobalReceiver(LODClearPayload.TYPE, (payload, context) ->
                 context.client().execute(() -> handleClear(payload)));
     }
 
@@ -171,7 +171,7 @@ public final class ClientLodReceiver {
 
     private static void dispatchInbound(Minecraft client, Inbound inbound) {
         ClientLevel level = client.level;
-        Identifier dimension = level == null ? null : level.dimension().identifier();
+        ResourceLocation dimension = level == null ? null : level.dimension().location();
         if (inbound.connectionGeneration != connectionGeneration.get()
                 || inbound.payload.streamEpoch() != networkEpoch
                 || !Objects.equals(dimension, networkDimension)) {
@@ -265,8 +265,8 @@ public final class ClientLodReceiver {
     private static void sendResult(Minecraft client, LODBatchResultPayload result, long generation) {
         client.execute(() -> {
             if (generation != connectionGeneration.get() || client.getConnection() == null) return;
-            if (ClientPlayNetworking.canSend(LODBatchResultPayload.TYPE)) {
-                ClientPlayNetworking.send(result);
+            if (ClientLodNetworking.canSend(LODBatchResultPayload.TYPE)) {
+                ClientLodNetworking.send(result);
             }
         });
     }
@@ -286,7 +286,7 @@ public final class ClientLodReceiver {
         setRemoteIngest(false);
     }
 
-    private static void setIngestSession(Identifier dimension, long epoch) {
+    private static void setIngestSession(ResourceLocation dimension, long epoch) {
         VoxyInstance instance = VoxyCommon.getInstance();
         if (instance == null) return;
         RemoteIngestService service = ((IVoxyServerIngestAccess) instance).voxyserver$getRemoteIngestService();
@@ -296,7 +296,7 @@ public final class ClientLodReceiver {
     private static void tellPlayer(Component message) {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.player != null) {
-            minecraft.gui.hud.getChat().addClientSystemMessage(message);
+            minecraft.gui.getChat().addMessage(message);
         }
     }
 

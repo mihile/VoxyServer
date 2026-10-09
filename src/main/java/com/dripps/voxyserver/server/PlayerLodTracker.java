@@ -2,7 +2,7 @@ package com.dripps.voxyserver.server;
 
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import me.cortex.voxy.common.world.WorldEngine;
-import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
 
 import java.util.HashMap;
@@ -25,7 +25,7 @@ public class PlayerLodTracker {
     private volatile boolean ready = false;
     private volatile boolean protocolOk = false;
 
-    private Identifier awaitingManifestDim;
+    private ResourceLocation awaitingManifestDim;
     private long manifestDeadlineTick;
     private long streamEpoch;
     private long manifestRequestId;
@@ -33,7 +33,7 @@ public class PlayerLodTracker {
     private long outstandingBytes;
     private int outstandingSections;
     private long retryNotBeforeTick;
-    private volatile Identifier activeDimension;
+    private volatile ResourceLocation activeDimension;
     private int lastChunkX;
     private int lastChunkZ;
 
@@ -55,7 +55,7 @@ public class PlayerLodTracker {
     private boolean scanExhausted;
     private long nextFullRescanTick;
 
-    public record StreamSession(Identifier dimension, long streamEpoch,
+    public record StreamSession(ResourceLocation dimension, long streamEpoch,
                                 long manifestRequestId, boolean manifestRequired) {}
 
     public record Delivery(long streamEpoch, long batchId) {}
@@ -92,7 +92,7 @@ public class PlayerLodTracker {
         return sectionOwners.containsKey(sectionKey);
     }
 
-    public synchronized boolean applyManifestBatch(Identifier dimension, long epoch, long requestId,
+    public synchronized boolean applyManifestBatch(ResourceLocation dimension, long epoch, long requestId,
                                                     int dimensionOrdinal, long[] sectionKeys, long[] hashes) {
         if (!matchesManifestLocked(dimension, epoch, requestId)) return false;
         int count = Math.min(sectionKeys.length, hashes.length);
@@ -105,7 +105,7 @@ public class PlayerLodTracker {
         return true;
     }
 
-    public synchronized StreamSession beginSession(Identifier dimension, boolean manifestRequired,
+    public synchronized StreamSession beginSession(ResourceLocation dimension, boolean manifestRequired,
                                                    long deadlineTick) {
         clearOutstandingLocked();
         streamEpoch = nextPositive(streamEpoch);
@@ -172,7 +172,7 @@ public class PlayerLodTracker {
         return !deferredDirtySections.isEmpty();
     }
 
-    public synchronized Delivery reserveBatch(Identifier dimension, long expectedEpoch,
+    public synchronized Delivery reserveBatch(ResourceLocation dimension, long expectedEpoch,
                                               long[] sectionKeys, long[] hashes, int bytes, long tick) {
         if (!dimension.equals(activeDimension) || expectedEpoch != streamEpoch) return null;
         if (sectionKeys.length == 0 || sectionKeys.length != hashes.length || bytes <= 0) return null;
@@ -224,7 +224,7 @@ public class PlayerLodTracker {
         return streamEpoch;
     }
 
-    public synchronized boolean isCurrentDelivery(Identifier dimension, long epoch) {
+    public synchronized boolean isCurrentDelivery(ResourceLocation dimension, long epoch) {
         return dimension.equals(activeDimension) && epoch == streamEpoch;
     }
 
@@ -236,14 +236,14 @@ public class PlayerLodTracker {
         retryNotBeforeTick = Math.max(retryNotBeforeTick, tick + 20L);
     }
 
-    public synchronized boolean completeManifest(Identifier dimension, long epoch, long requestId) {
+    public synchronized boolean completeManifest(ResourceLocation dimension, long epoch, long requestId) {
         if (!matchesManifestLocked(dimension, epoch, requestId)) return false;
         awaitingManifestDim = null;
         retryNotBeforeTick = 0L;
         return true;
     }
 
-    public synchronized boolean failManifest(Identifier dimension, long epoch, long requestId) {
+    public synchronized boolean failManifest(ResourceLocation dimension, long epoch, long requestId) {
         if (!matchesManifestLocked(dimension, epoch, requestId)) return false;
         awaitingManifestDim = null;
         resetScanStateLocked();
@@ -267,7 +267,7 @@ public class PlayerLodTracker {
     }
 
     // true if the scan should be gated waiting for this dims manifest. opens the gate once the deadline passes
-    public synchronized boolean isManifestGated(Identifier dimension, long currentTick) {
+    public synchronized boolean isManifestGated(ResourceLocation dimension, long currentTick) {
         if (awaitingManifestDim == null) return false;
         if (!awaitingManifestDim.equals(dimension)) return false;
         if (currentTick >= manifestDeadlineTick) {
@@ -290,11 +290,11 @@ public class PlayerLodTracker {
         this.lastChunkZ = player.getBlockZ() >> 4;
     }
 
-    public void setActiveDimension(Identifier dimension) {
+    public void setActiveDimension(ResourceLocation dimension) {
         this.activeDimension = dimension;
     }
 
-    public boolean isActiveDimension(Identifier dimension) {
+    public boolean isActiveDimension(ResourceLocation dimension) {
         return dimension.equals(this.activeDimension);
     }
 
@@ -302,7 +302,7 @@ public class PlayerLodTracker {
         return acknowledgedSectionHashes.size();
     }
 
-    private boolean matchesManifestLocked(Identifier dimension, long epoch, long requestId) {
+    private boolean matchesManifestLocked(ResourceLocation dimension, long epoch, long requestId) {
         return awaitingManifestDim != null
                 && awaitingManifestDim.equals(dimension)
                 && streamEpoch == epoch

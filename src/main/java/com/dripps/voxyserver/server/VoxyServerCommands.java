@@ -9,14 +9,13 @@ import com.mojang.brigadier.suggestion.SuggestionProvider;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
-import net.minecraft.commands.arguments.IdentifierArgument;
+import net.minecraft.commands.arguments.ResourceLocationArgument;
 import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.server.permissions.Permissions;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
@@ -32,7 +31,7 @@ public final class VoxyServerCommands {
         Supplier<WorldImportCoordinator> coordinatorSupplier = mod::getImportCoordinator;
         dispatcher.register(
                 Commands.literal("voxyserver")
-                        .requires(source -> source.permissions().hasPermission(Permissions.COMMANDS_ADMIN))
+                        .requires(source -> source.hasPermission(2))
                         .then(Commands.literal("import")
                                 .then(Commands.literal("existing")
                                         .then(Commands.literal("all")
@@ -44,22 +43,22 @@ public final class VoxyServerCommands {
                                                 .then(Commands.literal("force")
                                                         .executes(context -> executeCurrent(context.getSource(), coordinatorSupplier, true))))
                                         .then(Commands.literal("dimension")
-                                                .then(Commands.argument("dimension", IdentifierArgument.id())
+                                                .then(Commands.argument("dimension", ResourceLocationArgument.id())
                                                         .suggests((context, builder) -> {
                                                             java.util.List<String> dimensions = new java.util.ArrayList<>();
                                                             for (ServerLevel level : context.getSource().getServer().getAllLevels()) {
-                                                                dimensions.add(level.dimension().identifier().toString());
+                                                                dimensions.add(level.dimension().location().toString());
                                                             }
                                                             return SharedSuggestionProvider.suggest(dimensions, builder);
                                                         })
                                                         .executes(context -> executeDimension(
                                                                 context.getSource(),
                                                                 coordinatorSupplier,
-                                                                IdentifierArgument.getId(context, "dimension").toString(), false
+                                                                ResourceLocationArgument.getId(context, "dimension").toString(), false
                                                         ))
                                                         .then(Commands.literal("force")
                                                                 .executes(context -> executeDimension(context.getSource(), coordinatorSupplier,
-                                                                        IdentifierArgument.getId(context, "dimension").toString(), true)))))
+                                                                        ResourceLocationArgument.getId(context, "dimension").toString(), true)))))
                                         .then(Commands.literal("status")
                                                 .executes(context -> executeStatus(context.getSource(), coordinatorSupplier)))
                                         .then(Commands.literal("cancel")
@@ -147,7 +146,7 @@ public final class VoxyServerCommands {
 
     private static ServerLevel findLevel(CommandSourceStack source, String dimensionId) {
         for (ServerLevel level : source.getServer().getAllLevels()) {
-            if (level.dimension().identifier().toString().equals(dimensionId)) {
+            if (level.dimension().location().toString().equals(dimensionId)) {
                 return level;
             }
         }

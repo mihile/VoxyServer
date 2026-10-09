@@ -7,12 +7,12 @@ import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import me.cortex.voxy.common.world.WorldEngine;
 import me.cortex.voxy.commonImpl.VoxyCommon;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
-import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
+import com.dripps.voxyserver.client.ClientLodNetworking;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.multiplayer.ServerData;
 import net.minecraft.client.multiplayer.resolver.ServerAddress;
-import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceLocation;
 
 import java.util.Arrays;
 import java.util.Locale;
@@ -42,18 +42,18 @@ public final class ClientLodSettings {
     private static int serverMaxSections = -1;
     private static volatile boolean protocolOk;
     private static volatile boolean serverHashSyncEnabled = true;
-    private static volatile Identifier sessionDimension;
+    private static volatile ResourceLocation sessionDimension;
     private static volatile long streamEpoch;
     private static volatile long manifestRequestId;
     private static String activeServerKey;
     private static ClientLodConfig.Preferences activePreferences = CONFIG.getPreferencesForServer(null);
 
-    private record ManifestRequest(WorldIdentifier worldId, Identifier dimension,
+    private record ManifestRequest(WorldIdentifier worldId, ResourceLocation dimension,
                                    int playerSectionX, int playerSectionZ, int radiusSections,
                                    long streamEpoch, long requestId,
                                    long connectionGeneration, long buildGeneration) {}
 
-    private record ManifestChunk(Identifier dimension, long streamEpoch, long requestId,
+    private record ManifestChunk(ResourceLocation dimension, long streamEpoch, long requestId,
                                  long[] keys, long[] hashes, int status,
                                  long connectionGeneration, long buildGeneration) {}
 
@@ -116,8 +116,8 @@ public final class ClientLodSettings {
         Minecraft minecraft = Minecraft.getInstance();
         ClientLevel level = minecraft.level;
         if (minecraft.getConnection() == null || level == null
-                || !chunk.dimension.equals(level.dimension().identifier())) return;
-        ClientPlayNetworking.send(new LODManifestPayload(
+                || !chunk.dimension.equals(level.dimension().location())) return;
+        ClientLodNetworking.send(new LODManifestPayload(
                 chunk.dimension,
                 chunk.streamEpoch,
                 chunk.requestId,
@@ -133,7 +133,7 @@ public final class ClientLodSettings {
         var player = minecraft.player;
         if (!protocolOk || !serverHashSyncEnabled || !isEnabled()
                 || serverMaxRadius < 0 || level == null || player == null
-                || !session.dimension().equals(level.dimension().identifier())) {
+                || !session.dimension().equals(level.dimension().location())) {
             enqueueTerminal(session, LODManifestPayload.FAILED, generation);
             return;
         }
@@ -341,8 +341,9 @@ public final class ClientLodSettings {
     }
 
     public static void sendPreferences() {
-        if (Minecraft.getInstance().getConnection() == null) return;
-        ClientPlayNetworking.send(new LODPreferencesPayload(
+        if (Minecraft.getInstance().getConnection() == null
+                || !ClientLodNetworking.canSend(LODPreferencesPayload.TYPE)) return;
+        ClientLodNetworking.send(new LODPreferencesPayload(
                 activePreferences.enabled,
                 activePreferences.preferredRadius,
                 activePreferences.preferredMaxSections));

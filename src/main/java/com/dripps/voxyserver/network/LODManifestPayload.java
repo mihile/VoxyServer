@@ -1,37 +1,35 @@
 package com.dripps.voxyserver.network;
 
-import net.minecraft.network.RegistryFriendlyByteBuf;
-import net.minecraft.network.codec.StreamCodec;
-import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
-import net.minecraft.resources.Identifier;
+import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.resources.ResourceLocation;
 
 // client to server manifest of sections it already stores for a dimension
 public record LODManifestPayload(
-        Identifier dimension,
+        ResourceLocation dimension,
         long streamEpoch,
         long requestId,
         long[] keys,
         long[] hashes,
         int status
-) implements CustomPacketPayload {
+) implements LodPayload {
 
-    public static final int MAX_ENTRIES = 4096;
+    public static final int MAX_ENTRIES = 1024;
     public static final int PART = 0;
     public static final int COMPLETE = 1;
     public static final int FAILED = 2;
     public static final int CANCELED = 3;
 
     public static final Type<LODManifestPayload> TYPE =
-            new Type<>(Identifier.parse("voxyserver:lod_manifest"));
+            new Type<>(new ResourceLocation("voxyserver:lod_manifest"));
 
-    public static final StreamCodec<RegistryFriendlyByteBuf, LODManifestPayload> CODEC =
-            StreamCodec.of(LODManifestPayload::write, LODManifestPayload::read);
+    public static final PacketCodec<FriendlyByteBuf, LODManifestPayload> CODEC =
+            PacketCodec.of(LODManifestPayload::write, LODManifestPayload::read);
 
-    private static void write(RegistryFriendlyByteBuf buf, LODManifestPayload payload) {
+    private static void write(FriendlyByteBuf buf, LODManifestPayload payload) {
         if (payload.keys.length != payload.hashes.length || payload.keys.length > MAX_ENTRIES) {
             throw new IllegalArgumentException("invalid manifest payload size");
         }
-        buf.writeIdentifier(payload.dimension);
+        buf.writeResourceLocation(payload.dimension);
         buf.writeVarLong(payload.streamEpoch);
         buf.writeVarLong(payload.requestId);
         buf.writeByte(payload.status);
@@ -43,8 +41,8 @@ public record LODManifestPayload(
         }
     }
 
-    private static LODManifestPayload read(RegistryFriendlyByteBuf buf) {
-        Identifier dimension = buf.readIdentifier();
+    private static LODManifestPayload read(FriendlyByteBuf buf) {
+        ResourceLocation dimension = buf.readResourceLocation();
         long streamEpoch = buf.readVarLong();
         long requestId = buf.readVarLong();
         int status = buf.readByte() & 0xFF;
@@ -63,7 +61,7 @@ public record LODManifestPayload(
     }
 
     @Override
-    public Type<? extends CustomPacketPayload> type() {
+    public Type<? extends LodPayload> type() {
         return TYPE;
     }
 }

@@ -2,26 +2,24 @@ package com.dripps.voxyserver.network;
 
 import io.netty.buffer.Unpooled;
 import net.minecraft.core.RegistryAccess;
-import net.minecraft.network.RegistryFriendlyByteBuf;
-import net.minecraft.network.codec.StreamCodec;
-import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
-import net.minecraft.resources.Identifier;
+import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.resources.ResourceLocation;
 
 // wraps preserialized LODBulkPayload bytes so the heavy encoding
 // happens on the streaming thread instead of the tick thread
 public record PreSerializedLodPayload(long streamEpoch, long batchId, int sectionCount,
-                                      byte[] data) implements CustomPacketPayload {
+                                      byte[] data) implements LodPayload {
 
-    public static final int MAX_ENCODED_BYTES = 8 * 1024 * 1024;
+    public static final int MAX_ENCODED_BYTES = 1024 * 1024 - 64;
     public static final int MAX_SECTIONS = 16;
 
     public static final Type<PreSerializedLodPayload> TYPE =
-            new Type<>(Identifier.parse("voxyserver:lod_preserialized"));
+            new Type<>(new ResourceLocation("voxyserver:lod_preserialized"));
 
-    public static final StreamCodec<RegistryFriendlyByteBuf, PreSerializedLodPayload> CODEC =
-            StreamCodec.of(PreSerializedLodPayload::write, PreSerializedLodPayload::read);
+    public static final PacketCodec<FriendlyByteBuf, PreSerializedLodPayload> CODEC =
+            PacketCodec.of(PreSerializedLodPayload::write, PreSerializedLodPayload::read);
 
-    private static void write(RegistryFriendlyByteBuf buf, PreSerializedLodPayload payload) {
+    private static void write(FriendlyByteBuf buf, PreSerializedLodPayload payload) {
         validate(payload.streamEpoch, payload.batchId, payload.sectionCount, payload.data.length);
         buf.writeVarLong(payload.streamEpoch);
         buf.writeVarLong(payload.batchId);
@@ -30,7 +28,7 @@ public record PreSerializedLodPayload(long streamEpoch, long batchId, int sectio
         buf.writeBytes(payload.data);
     }
 
-    private static PreSerializedLodPayload read(RegistryFriendlyByteBuf buf) {
+    private static PreSerializedLodPayload read(FriendlyByteBuf buf) {
         long streamEpoch = buf.readVarLong();
         long batchId = buf.readVarLong();
         int sectionCount = buf.readVarInt();
@@ -48,7 +46,7 @@ public record PreSerializedLodPayload(long streamEpoch, long batchId, int sectio
     public static PreSerializedLodPayload fromBulk(LODBulkPayload bulk, RegistryAccess registryAccess) {
         var raw = Unpooled.buffer(256, MAX_ENCODED_BYTES);
         try {
-            var rfb = new RegistryFriendlyByteBuf(raw, registryAccess);
+            var rfb = new FriendlyByteBuf(raw);
             LODBulkPayload.CODEC.encode(rfb, bulk);
             byte[] bytes = new byte[rfb.readableBytes()];
             rfb.readBytes(bytes);
@@ -70,7 +68,7 @@ public record PreSerializedLodPayload(long streamEpoch, long batchId, int sectio
     public LODBulkPayload decodeBulk(RegistryAccess registryAccess) {
         var raw = Unpooled.wrappedBuffer(data);
         try {
-            var rfb = new RegistryFriendlyByteBuf(raw, registryAccess);
+            var rfb = new FriendlyByteBuf(raw);
             LODBulkPayload decoded = LODBulkPayload.CODEC.decode(rfb);
             if (rfb.readableBytes() != 0) {
                 throw new IllegalArgumentException("trailing preserialized data");
@@ -82,7 +80,7 @@ public record PreSerializedLodPayload(long streamEpoch, long batchId, int sectio
     }
 
     @Override
-    public Type<? extends CustomPacketPayload> type() {
+    public Type<? extends LodPayload> type() {
         return TYPE;
     }
 
