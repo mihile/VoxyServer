@@ -12,7 +12,7 @@ import me.cortex.voxy.common.voxelization.WorldVoxilizedSectionMipper;
 import me.cortex.voxy.common.world.WorldEngine;
 import me.cortex.voxy.common.world.WorldUpdater;
 import me.cortex.voxy.common.world.other.Mapper;
-import me.cortex.voxy.commonImpl.WorldIdentifier;
+import com.dripps.voxyserver.util.ClientCacheKey;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
@@ -37,13 +37,15 @@ public final class RemoteIngestService {
     private static final int MAX_QUEUED_BATCHES = 64;
 
     private final ThreadPoolExecutor executor;
+    private final Object sessionLock = new Object();
     private final AtomicLong generation = new AtomicLong();
     private volatile ResourceLocation activeDimension;
     private volatile long activeEpoch;
     private volatile boolean live = true;
 
     private final class IngestTask implements Runnable {
-        private final WorldIdentifier worldId;
+        private final WorldEngine engine;
+        private final ClientCacheKey cacheKey;
         private final ResourceLocation dimension;
         private final PreSerializedLodPayload raw;
         private final RegistryAccess registryAccess;
@@ -51,10 +53,12 @@ public final class RemoteIngestService {
         private final Consumer<LODBatchResultPayload> completion;
         private final AtomicBoolean completed = new AtomicBoolean();
 
-        private IngestTask(WorldIdentifier worldId, ResourceLocation dimension,
+        private IngestTask(WorldEngine engine, ClientCacheKey cacheKey, ResourceLocation dimension,
                            PreSerializedLodPayload raw, RegistryAccess registryAccess,
                            long taskGeneration, Consumer<LODBatchResultPayload> completion) {
-            this.worldId = worldId;
+            this.engine = engine;
+            this.cacheKey = cacheKey;
+            engine.acquireRef();
             this.dimension = dimension;
             this.raw = raw;
             this.registryAccess = registryAccess;
@@ -80,7 +84,8 @@ public final class RemoteIngestService {
 
         private void finish(int status) {
             if (completed.compareAndSet(false, true)) {
-                completion.accept(new LODBatchResultPayload(raw.streamEpoch(), raw.batchId(), status));
+                try { completion.accept(new LODBatchResultPayload(raw.streamEpoch(), raw.batchId(), status)); }
+                finally { engine.releaseRef(); }
             }
         }
     }
@@ -101,30 +106,33 @@ public final class RemoteIngestService {
         );
     }
 
-    public boolean enqueueIngest(WorldIdentifier worldId, ResourceLocation dimension,
+    public boolean enqueueIngest(WorldEngine engine, ClientCacheKey cacheKey, ResourceLocation dimension,
                                  PreSerializedLodPayload raw, RegistryAccess registryAccess,
                                  Consumer<LODBatchResultPayload> completion) {
         if (!live || raw.streamEpoch() != activeEpoch || !Objects.equals(dimension, activeDimension)) {
             return false;
         }
         IngestTask task = new IngestTask(
-                worldId, dimension, raw, registryAccess, generation.get(), completion);
+                engine, cacheKey, dimension, raw, registryAccess, generation.get(), completion);
         try {
             executor.execute(task);
             return true;
         } catch (RejectedExecutionException ignored) {
-            return false;
+            task.cancel();
+            return true; // Completion already reported STALE; do not acknowledge twice.
         }
     }
 
     public void startSession(ResourceLocation dimension, long epoch) {
-        if (activeEpoch == epoch && Objects.equals(activeDimension, dimension)) return;
-        activeDimension = dimension;
-        activeEpoch = epoch;
-        generation.incrementAndGet();
-        Runnable queued;
-        while ((queued = executor.getQueue().poll()) != null) {
-            if (queued instanceof IngestTask task) task.cancel();
+        synchronized (sessionLock) {
+            if (activeEpoch == epoch && Objects.equals(activeDimension, dimension)) return;
+            activeDimension = dimension;
+            activeEpoch = epoch;
+            generation.incrementAndGet();
+            Runnable queued;
+            while ((queued = executor.getQueue().poll()) != null) {
+                if (queued instanceof IngestTask task) task.cancel();
+            }
         }
     }
 
@@ -133,10 +141,12 @@ public final class RemoteIngestService {
     }
 
     public void shutdown() {
-        live = false;
-        activeDimension = null;
-        activeEpoch = 0L;
-        generation.incrementAndGet();
+        synchronized (sessionLock) {
+            live = false;
+            activeDimension = null;
+            activeEpoch = 0L;
+            generation.incrementAndGet();
+        }
         Runnable queued;
         while ((queued = executor.getQueue().poll()) != null) {
             if (queued instanceof IngestTask task) task.cancel();
@@ -159,7 +169,7 @@ public final class RemoteIngestService {
                 || !task.dimension.equals(bulk.dimension())) return LODBatchResultPayload.FAILURE;
         if (!isCurrent(task)) return LODBatchResultPayload.STALE;
 
-        WorldEngine engine = task.worldId.getOrCreateEngine();
+        WorldEngine engine = task.engine;
         if (engine == null || !engine.isLive()) return LODBatchResultPayload.FAILURE;
         engine.markActive();
         Mapper mapper = engine.getMapper();
@@ -205,7 +215,10 @@ public final class RemoteIngestService {
                         }
                         voxelized.lvl0NonAirCount = nonAirCount;
                         WorldVoxilizedSectionMipper.mipSection(voxelized, mapper);
-                        WorldUpdater.insertUpdate(engine, voxelized);
+                        synchronized (sessionLock) {
+                            if (!isCurrent(task)) return LODBatchResultPayload.STALE;
+                            WorldUpdater.insertUpdate(engine, voxelized);
+                        }
                     }
                 }
             }
@@ -213,11 +226,13 @@ public final class RemoteIngestService {
             hashes[sectionIndex] = section.contentHash();
         }
 
-        if (!isCurrent(task)) return LODBatchResultPayload.STALE;
-        if (!ClientLodHashStore.get().recordBatch(task.worldId.getWorldId(), keys, hashes)) {
-            return LODBatchResultPayload.FAILURE;
+        synchronized (sessionLock) {
+            if (!isCurrent(task)) return LODBatchResultPayload.STALE;
+            if (!ClientLodHashStore.get().recordBatch(task.cacheKey, keys, hashes)) {
+                return LODBatchResultPayload.FAILURE;
+            }
+            return LODBatchResultPayload.SUCCESS;
         }
-        return LODBatchResultPayload.SUCCESS;
     }
 
     private boolean isCurrent(IngestTask task) {

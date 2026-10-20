@@ -1,1 +1,1 @@
-{"schemaVersion": 1, "id": "lifecycle_harness", "version": "1", "environment": "client", "entrypoints": {"client": ["test.LifecycleHarness"]}}
+{"schemaVersion":1,"id":"lifecycle_harness","version":"1","environment":"client","entrypoints":{"client":["test.LifecycleHarness"]},"mixins":["lifecycle-test.mixins.json"]}

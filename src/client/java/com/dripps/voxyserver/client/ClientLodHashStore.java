@@ -4,6 +4,7 @@ import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import me.cortex.voxy.common.Logger;
 import net.fabricmc.loader.api.FabricLoader;
+import com.dripps.voxyserver.util.ClientCacheKey;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -32,7 +33,7 @@ public final class ClientLodHashStore {
     private static final int MAX_PENDING_ENTRIES = 131_072;
 
     private final Object pendingLock = new Object();
-    private final Map<String, Long2LongOpenHashMap> pending = new HashMap<>();
+    private final Map<ClientCacheKey, Long2LongOpenHashMap> pending = new HashMap<>();
     private final AtomicBoolean drainScheduled = new AtomicBoolean();
     private int pendingEntries;
     private final ScheduledExecutorService owner = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -40,7 +41,7 @@ public final class ClientLodHashStore {
         thread.setDaemon(true);
         return thread;
     });
-    private final LinkedHashMap<String, State> loaded = new LinkedHashMap<>(4, 0.75f, true);
+    private final LinkedHashMap<ClientCacheKey, State> loaded = new LinkedHashMap<>(4, 0.75f, true);
 
     private static final class State {
         private final Long2LongOpenHashMap hashes;
@@ -59,7 +60,7 @@ public final class ClientLodHashStore {
         return INSTANCE;
     }
 
-    public boolean recordBatch(String worldId, long[] keys, long[] hashes) {
+    public boolean recordBatch(ClientCacheKey worldId, long[] keys, long[] hashes) {
         if (worldId == null || keys.length != hashes.length) return false;
         synchronized (pendingLock) {
             Long2LongOpenHashMap delta = pending.get(worldId);
@@ -82,7 +83,7 @@ public final class ClientLodHashStore {
         return true;
     }
 
-    public CompletableFuture<Long2LongOpenHashMap> snapshotAsync(String worldId, BooleanSupplier current) {
+    public CompletableFuture<Long2LongOpenHashMap> snapshotAsync(ClientCacheKey worldId, BooleanSupplier current) {
         CompletableFuture<Long2LongOpenHashMap> future = new CompletableFuture<>();
         owner.execute(() -> {
             try {
@@ -114,14 +115,14 @@ public final class ClientLodHashStore {
     }
 
     private void drainPending() {
-        Map<String, Long2LongOpenHashMap> deltas;
+        Map<ClientCacheKey, Long2LongOpenHashMap> deltas;
         synchronized (pendingLock) {
             deltas = new HashMap<>(pending);
             pending.clear();
             pendingEntries = 0;
             drainScheduled.set(false);
         }
-        for (Map.Entry<String, Long2LongOpenHashMap> entry : deltas.entrySet()) {
+        for (Map.Entry<ClientCacheKey, Long2LongOpenHashMap> entry : deltas.entrySet()) {
             State state = stateFor(entry.getKey());
             state.hashes.putAll(entry.getValue());
             state.dirty += entry.getValue().size();
@@ -131,14 +132,14 @@ public final class ClientLodHashStore {
         }
     }
 
-    private State stateFor(String worldId) {
+    private State stateFor(ClientCacheKey worldId) {
         State state = loaded.get(worldId);
         if (state != null) return state;
         state = new State(load(worldId));
         loaded.put(worldId, state);
         while (loaded.size() > MAX_LOADED_WORLDS) {
-            Iterator<Map.Entry<String, State>> iterator = loaded.entrySet().iterator();
-            Map.Entry<String, State> eldest = iterator.next();
+            Iterator<Map.Entry<ClientCacheKey, State>> iterator = loaded.entrySet().iterator();
+            Map.Entry<ClientCacheKey, State> eldest = iterator.next();
             flush(eldest.getKey(), eldest.getValue());
             iterator.remove();
         }
@@ -148,7 +149,7 @@ public final class ClientLodHashStore {
     private void flushAllSafely() {
         try {
             drainPending();
-            for (Map.Entry<String, State> entry : loaded.entrySet()) {
+            for (Map.Entry<ClientCacheKey, State> entry : loaded.entrySet()) {
                 flush(entry.getKey(), entry.getValue());
             }
         } catch (Throwable throwable) {
@@ -156,7 +157,7 @@ public final class ClientLodHashStore {
         }
     }
 
-    private void flush(String worldId, State state) {
+    private void flush(ClientCacheKey worldId, State state) {
         if (state.dirty == 0) return;
         Path file = fileFor(worldId);
         Path temporary = file.resolveSibling(file.getFileName() + ".tmp");
@@ -180,7 +181,7 @@ public final class ClientLodHashStore {
         }
     }
 
-    private static Long2LongOpenHashMap load(String worldId) {
+    private static Long2LongOpenHashMap load(ClientCacheKey worldId) {
         Long2LongOpenHashMap result = new Long2LongOpenHashMap();
         result.defaultReturnValue(0L);
         Path file = fileFor(worldId);
@@ -207,8 +208,7 @@ public final class ClientLodHashStore {
         return result;
     }
 
-    private static Path fileFor(String worldId) {
-        return FabricLoader.getInstance().getGameDir()
-                .resolve("voxyserver").resolve("hashes").resolve(worldId + ".bin");
+    private static Path fileFor(ClientCacheKey worldId) {
+        return worldId.fileUnder(FabricLoader.getInstance().getGameDir());
     }
 }

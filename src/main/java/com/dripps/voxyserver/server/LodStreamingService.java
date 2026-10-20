@@ -41,6 +41,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class LodStreamingService {
@@ -52,6 +53,8 @@ public class LodStreamingService {
     private static final int MAX_SCAN_CANDIDATES_PER_SNAPSHOT = 16_384;
     private static final int MAX_ACQUIRE_ATTEMPTS_PER_SNAPSHOT = 256;
     private static final int MAX_MISSING_ACQUIRES_PER_SNAPSHOT = 16;
+    public static final int MAX_SECTION_VERSIONS = 131_072;
+    public static final int MAX_HASH_CACHE_ENTRIES = 65_536;
     // we have a grace window for the client manifest to arrive before the scan falls back to a full send
     private static final long MANIFEST_TIMEOUT_TICKS = 60L;
     private static final long BATCH_ACK_TIMEOUT_TICKS = 600L;
@@ -66,6 +69,7 @@ public class LodStreamingService {
     private final DimensionOrdinals dimOrdinals = new DimensionOrdinals();
     private final ConcurrentHashMap<UUID, PlayerLodTracker> trackers = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Long, Integer> sectionVersions = new ConcurrentHashMap<>();
+    private final AtomicInteger minVersionFloor = new AtomicInteger(0);
     private final ConcurrentHashMap<Long, long[]> hashCacheByKey = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Long, Long> pendingDirtySections = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Long, Long> initialLoadSections = new ConcurrentHashMap<>();
@@ -151,7 +155,9 @@ public class LodStreamingService {
         this.tickInterval = config.tickInterval;
         this.pendingDirtyTimeoutTicks = Math.max(config.dirtyTrackingInterval * 2L, 40L);
         this.hashSyncEnabled = config.hashSyncEnabled;
-        this.engine.setDirtySectionListener(this::onWorldSectionDirty);
+        if (this.engine != null) {
+            this.engine.setDirtySectionListener(this::onWorldSectionDirty);
+        }
     }
 
     public void register() {
@@ -332,7 +338,21 @@ public class LodStreamingService {
 
     public record StreamingStats(int players, int trackedSections, int hashCacheSize,
                                  int pendingDirty, int queuedDirty, int loadedChunks,
+                                 long estimatedMetadataBytes,
                                  List<PlayerStat> perPlayer) {}
+
+    public long estimatedMetadataBytes() {
+        long total = (long) sectionVersions.size() * 64L
+                + (long) hashCacheByKey.size() * 88L
+                + (long) pendingDirtySections.size() * 64L
+                + (long) initialLoadSections.size() * 64L
+                + (long) queuedDirtySections.size() * 48L
+                + (long) loadedChunks.size() * 48L;
+        for (PlayerLodTracker tracker : trackers.values()) {
+            total += tracker.estimatedMetadataBytes();
+        }
+        return total;
+    }
 
     public StreamingStats snapshotStats(MinecraftServer mcServer) {
         List<PlayerStat> perPlayer = new ArrayList<>();
@@ -354,6 +374,7 @@ public class LodStreamingService {
                 pendingDirtySections.size(),
                 queuedDirtySections.size(),
                 loadedChunks.size(),
+                estimatedMetadataBytes(),
                 perPlayer);
     }
 
@@ -468,27 +489,31 @@ public class LodStreamingService {
     private void streamForSnapshot(MinecraftServer server, PlayerSnapshot snap, PlayerLodTracker tracker) {
         if (corruptedDimensions.contains(snap.dimension)) return;
         if (!tracker.isActiveDimension(snap.dimension)) return;
+
+        int playerWorldSecX = snap.chunkX >> 1;
+        int playerWorldSecZ = snap.chunkZ >> 1;
+        int effectiveRadius = tracker.getEffectiveRadius(lodStreamRadius);
+        int radiusSections = effectiveRadius >> 1;
+        int dimOrd = dimOrdinals.getOrdinal(snap.dimension);
+        // Run incremental out-of-range pruning even while manifest-gated, backed off, or credit-throttled.
+        tracker.pruneOutOfRangeAcknowledged(dimOrd, playerWorldSecX, playerWorldSecZ, radiusSections * 2);
+
         if (tracker.isBackedOff(currentTick)) return;
         if (hashSyncEnabled && tracker.isManifestGated(snap.dimension, currentTick)) return;
         long streamEpoch = tracker.streamEpoch();
         currentStreamDimension = snap.dimension;
+        if (engine == null) return;
         WorldEngine world = engine.getOrCreate(snap.worldId, snap.dimension);
         if (world == null) return;
         if (!engine.prepareStoredSectionPresence(
                 snap.worldId, world, () -> lastStreamHeartbeat = System.nanoTime())) return;
 
-        int playerWorldSecX = snap.chunkX >> 1;
-        int playerWorldSecZ = snap.chunkZ >> 1;
-
-        int effectiveRadius = tracker.getEffectiveRadius(lodStreamRadius);
         int effectiveMaxSections = Math.min(
                 tracker.getEffectiveMaxSections(maxSectionsPerTick),
                 tracker.remainingSectionCredit()
         );
         if (effectiveMaxSections <= 0) return;
-        int radiusSections = effectiveRadius >> 1;
         Mapper mapper = world.getMapper();
-        int dimOrd = dimOrdinals.getOrdinal(snap.dimension);
 
         if (!tracker.prepareScan(
                 playerWorldSecX,
@@ -553,7 +578,7 @@ public class LodStreamingService {
                 LODSectionPayload payload = serializeSection(section, snap.dimension, mapper, snap.biomeRegistry);
                 if (payload != null) {
                     long hash = payload.contentHash();
-                    hashCacheByKey.put(composite, new long[]{version, hash});
+                    putHashCacheEntry(composite, version, hash, MAX_HASH_CACHE_ENTRIES);
                     if (!tracker.hasSent(composite, hash) && !tracker.hasOutstanding(composite)) {
                         batch.add(payload);
                         selectedKeys.add(key);
@@ -662,15 +687,11 @@ public class LodStreamingService {
 
     // canonical content fingerprint independent of lut assembly order
     // sort lut slots by blockstate biome light, then hash the sorted table plus per voxel sorted slot
-    private static long computeContentHash(int[] lutBlockStateIds, int[] lutBiomeIds, byte[] lutLight, short[] indexArray) {
+    static long computeContentHash(int[] lutBlockStateIds, int[] lutBiomeIds, byte[] lutLight, short[] indexArray) {
         int lutLen = lutBlockStateIds.length;
-        Integer[] order = new Integer[lutLen];
+        int[] order = new int[lutLen];
         for (int i = 0; i < lutLen; i++) order[i] = i;
-        Arrays.sort(order, (a, b) -> {
-            if (lutBlockStateIds[a] != lutBlockStateIds[b]) return Integer.compare(lutBlockStateIds[a], lutBlockStateIds[b]);
-            if (lutBiomeIds[a] != lutBiomeIds[b]) return Integer.compare(lutBiomeIds[a], lutBiomeIds[b]);
-            return Integer.compare(lutLight[a] & 0xFF, lutLight[b] & 0xFF);
-        });
+        sortLutOrder(order, lutBlockStateIds, lutBiomeIds, lutLight);
         int[] remap = new int[lutLen];
         for (int p = 0; p < lutLen; p++) remap[order[p]] = p;
 
@@ -685,6 +706,61 @@ public class LodStreamingService {
             h = mix(h, remap[slot & 0xFFFF]);
         }
         return fmix64(h ^ ((long) indexArray.length));
+    }
+
+    private static void sortLutOrder(int[] order, int[] lutBlockStateIds, int[] lutBiomeIds, byte[] lutLight) {
+        int n = order.length;
+        if (n <= 1) return;
+        if (n <= 32) {
+            for (int i = 1; i < n; i++) {
+                int key = order[i];
+                int j = i - 1;
+                while (j >= 0 && compareLutSlots(order[j], key, lutBlockStateIds, lutBiomeIds, lutLight) > 0) {
+                    order[j + 1] = order[j];
+                    j--;
+                }
+                order[j + 1] = key;
+            }
+            return;
+        }
+        // In-place heapsort for larger LUTs (zero boxing allocations, O(n log n) worst-case).
+        for (int i = (n >>> 1) - 1; i >= 0; i--) {
+            siftDownLut(order, i, n, lutBlockStateIds, lutBiomeIds, lutLight);
+        }
+        for (int end = n - 1; end > 0; end--) {
+            int tmp = order[0];
+            order[0] = order[end];
+            order[end] = tmp;
+            siftDownLut(order, 0, end, lutBlockStateIds, lutBiomeIds, lutLight);
+        }
+    }
+
+    private static void siftDownLut(int[] order, int root, int size, int[] lutBlockStateIds, int[] lutBiomeIds, byte[] lutLight) {
+        int value = order[root];
+        int half = size >>> 1;
+        while (root < half) {
+            int child = (root << 1) + 1;
+            int right = child + 1;
+            if (right < size && compareLutSlots(order[child], order[right], lutBlockStateIds, lutBiomeIds, lutLight) < 0) {
+                child = right;
+            }
+            if (compareLutSlots(value, order[child], lutBlockStateIds, lutBiomeIds, lutLight) >= 0) {
+                break;
+            }
+            order[root] = order[child];
+            root = child;
+        }
+        order[root] = value;
+    }
+
+    private static int compareLutSlots(int a, int b, int[] lutBlockStateIds, int[] lutBiomeIds, byte[] lutLight) {
+        int blockA = lutBlockStateIds[a], blockB = lutBlockStateIds[b];
+        if (blockA != blockB) return Integer.compare(blockA, blockB);
+        int biomeA = lutBiomeIds[a], biomeB = lutBiomeIds[b];
+        if (biomeA != biomeB) return Integer.compare(biomeA, biomeB);
+        int lightA = lutLight[a] & 0xFF, lightB = lutLight[b] & 0xFF;
+        if (lightA != lightB) return Integer.compare(lightA, lightB);
+        return Integer.compare(a, b);
     }
 
     private static long mix(long h, long v) {
@@ -763,12 +839,7 @@ public class LodStreamingService {
         ResourceLocation dimension = dimOrdinals.getDimension(extractSectionDimOrdinal(compositeKey));
         long sectionKey = extractSectionKey(compositeKey);
 
-        sectionVersions.compute(compositeKey, (ignored, currentVersion) -> {
-            if (currentVersion == null || currentVersion == Integer.MAX_VALUE) {
-                return 1;
-            }
-            return currentVersion + 1;
-        });
+        bumpSectionVersion(compositeKey);
 
         ServerLevel level = findLevel(server, dimension);
         if (level == null) return;
@@ -797,7 +868,61 @@ public class LodStreamingService {
     }
 
     private int getSectionVersion(int dimOrdinal, long sectionKey) {
-        return sectionVersions.getOrDefault(composeSectionKey(dimOrdinal, sectionKey), 0);
+        return getCompositeSectionVersion(composeSectionKey(dimOrdinal, sectionKey));
+    }
+
+    int getCompositeSectionVersion(long compositeKey) {
+        int floor = minVersionFloor.get();
+        Integer v = sectionVersions.get(compositeKey);
+        return v == null ? floor : Math.max(v, floor);
+    }
+
+    int bumpSectionVersion(long compositeKey) {
+        return bumpSectionVersion(compositeKey, MAX_SECTION_VERSIONS);
+    }
+
+    int bumpSectionVersion(long compositeKey, int maxEntries) {
+        hashCacheByKey.remove(compositeKey);
+        int floor = minVersionFloor.get();
+        int updated = sectionVersions.compute(compositeKey, (ignored, currentVersion) -> {
+            int base = currentVersion == null ? floor : Math.max(currentVersion, floor);
+            return base == Integer.MAX_VALUE ? 1 : base + 1;
+        });
+        trimSectionVersionsIfNeeded(maxEntries);
+        return updated;
+    }
+
+    void trimSectionVersionsIfNeeded(int maxEntries) {
+        if (sectionVersions.size() <= maxEntries) {
+            return;
+        }
+        var iterator = sectionVersions.entrySet().iterator();
+        while (sectionVersions.size() > maxEntries && iterator.hasNext()) {
+            var entry = iterator.next();
+            Long evictedKey = entry.getKey();
+            Integer evictedVersion = entry.getValue();
+            if (sectionVersions.remove(evictedKey, evictedVersion)) {
+                hashCacheByKey.remove(evictedKey);
+                if (evictedVersion != null) {
+                    minVersionFloor.accumulateAndGet(evictedVersion, Math::max);
+                }
+            }
+        }
+    }
+
+    void putHashCacheEntry(long compositeKey, int version, long hash, int maxEntries) {
+        hashCacheByKey.put(compositeKey, new long[]{version, hash});
+        if (hashCacheByKey.size() > maxEntries) {
+            var iterator = hashCacheByKey.keySet().iterator();
+            while (hashCacheByKey.size() > maxEntries && iterator.hasNext()) {
+                Long key = iterator.next();
+                hashCacheByKey.remove(key);
+            }
+        }
+    }
+
+    long[] getCachedHashEntry(long compositeKey) {
+        return hashCacheByKey.get(compositeKey);
     }
 
     private void expirePendingDirtySections() {
@@ -815,13 +940,7 @@ public class LodStreamingService {
             }
 
             initialLoadSections.remove(entry.getKey());
-
-            sectionVersions.compute(entry.getKey(), (ignored, currentVersion) -> {
-                if (currentVersion == null || currentVersion == Integer.MAX_VALUE) {
-                    return 1;
-                }
-                return currentVersion + 1;
-            });
+            bumpSectionVersion(entry.getKey());
         }
     }
 
@@ -868,12 +987,7 @@ public class LodStreamingService {
             }
 
             // bump version so hasSent() returns false and the scanner resends
-            sectionVersions.compute(compositeKey, (ignored, currentVersion) -> {
-                if (currentVersion == null || currentVersion == Integer.MAX_VALUE) {
-                    return 1;
-                }
-                return currentVersion + 1;
-            });
+            bumpSectionVersion(compositeKey);
         }
     }
 
@@ -968,24 +1082,48 @@ public class LodStreamingService {
             PlayerLodTracker tracker = trackers.get(batch.playerId());
             if (tracker == null || !hashSyncEnabled || !tracker.isActiveDimension(batch.dimension())) continue;
 
+            int dimOrd = dimOrdinals.getOrdinal(batch.dimension());
+            int radiusSections = tracker.getEffectiveRadius(lodStreamRadius) >> 1;
+            int centerSecX = tracker.getLastChunkX() >> 1;
+            int centerSecZ = tracker.getLastChunkZ() >> 1;
             if (batch.status() == LODManifestPayload.PART) {
-                int dimOrd = dimOrdinals.getOrdinal(batch.dimension());
                 tracker.applyManifestBatch(
                         batch.dimension(), batch.streamEpoch(), batch.requestId(),
                         dimOrd, batch.keys(), batch.hashes());
+                tracker.pruneOutOfRangeAcknowledged(dimOrd, centerSecX, centerSecZ, radiusSections * 2);
             } else if (batch.status() == LODManifestPayload.COMPLETE) {
                 if (batch.keys().length > 0) {
-                    int dimOrd = dimOrdinals.getOrdinal(batch.dimension());
                     tracker.applyManifestBatch(
                             batch.dimension(), batch.streamEpoch(), batch.requestId(),
                             dimOrd, batch.keys(), batch.hashes());
                 }
+                tracker.pruneOutOfRangeAcknowledged(dimOrd, centerSecX, centerSecZ, radiusSections * 2);
                 tracker.completeManifest(batch.dimension(), batch.streamEpoch(), batch.requestId());
             } else {
                 tracker.failManifest(batch.dimension(), batch.streamEpoch(), batch.requestId());
             }
         }
         return drained;
+    }
+
+    void registerTrackerForTest(UUID playerId, PlayerLodTracker tracker) {
+        trackers.put(playerId, tracker);
+    }
+
+    void offerManifestBatchForTest(UUID playerId, ResourceLocation dimension,
+                                   long streamEpoch, long requestId,
+                                   long[] keys, long[] hashes, int status) {
+        pendingManifestBatches.offer(new ManifestBatch(playerId, dimension, streamEpoch, requestId, keys, hashes, status));
+    }
+
+    int drainManifestBatchesForTest(int maxBatches) {
+        return drainManifestBatches(maxBatches);
+    }
+
+    void streamForSnapshotForTest(UUID playerId, ResourceLocation dimension, int chunkX, int chunkZ) {
+        PlayerLodTracker tracker = trackers.get(playerId);
+        if (tracker == null) return;
+        streamForSnapshot(null, new PlayerSnapshot(playerId, chunkX, chunkZ, null, dimension, -4, 20, null), tracker);
     }
 
     private void handleVoxyCorruption(ResourceLocation dimension, String context, Exception e) {

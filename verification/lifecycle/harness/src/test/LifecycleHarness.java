@@ -16,6 +16,7 @@ import java.nio.file.*;
 import java.util.concurrent.TimeUnit;
 
 public class LifecycleHarness implements ClientModInitializer {
+    public static volatile boolean holdIngest;
     private int phase;
     private long since = System.nanoTime();
     private long start = since;
@@ -29,8 +30,13 @@ public class LifecycleHarness implements ClientModInitializer {
     private Object field(Class<?> type,String name) throws Exception { var f=type.getDeclaredField(name); f.setAccessible(true); return f.get(null); }
     private void cleaned() throws Exception {
         require(VoxyCommon.getInstance()==null && !ClientSessionEvents.inSession,"instance/session left behind");
-        require(((java.util.ArrayDeque<?>)field(ClientLodReceiver.class,"inboundQueue")).isEmpty(),"queued inbound left behind");
-        require((Integer)field(ClientLodReceiver.class,"reservedBatches")==0,"reserved batches left behind");
+        var inbox=(com.dripps.voxyserver.network.ConnectionInbox<?>)field(ClientLodReceiver.class,"inbox");
+        require(inbox.current()==null && inbox.size()==0,"connection inbox left behind");
+        require((Integer)field(ClientLodReceiver.class,"reservedBatches")==0,"ingest batch reservations left behind");
+        require((Long)field(ClientLodReceiver.class,"reservedBytes")==0L,"ingest bytes left behind");
+        require(((java.util.ArrayDeque<?>)field(ClientLodReceiver.class,"pending")).isEmpty(),"pending LOD left behind");
+        require(((java.util.concurrent.atomic.AtomicReference<?>)field(ClientLodSettings.class,"pendingManifestRequest")).get()==null,"pending manifest engine reference left behind");
+        require(((java.util.concurrent.BlockingQueue<?>)field(ClientLodSettings.class,"manifestChunks")).isEmpty(),"manifest chunks left behind");
         require(Thread.getAllStackTraces().keySet().stream().noneMatch(t->t.isAlive() && t.getName().equals("VoxyServer Remote Ingest")),"remote worker left behind");
         log("CLEANED phase="+phase);
     }
@@ -57,7 +63,7 @@ public class LifecycleHarness implements ClientModInitializer {
         var instance=(VoxyClientInstance)VoxyCommon.getInstance();
         Path base=instance.getStorageBasePath().toAbsolutePath().normalize();
         String world=WorldIdentifier.of(mc.level).getWorldId();
-        String key=world;
+        var key=ClientLodReceiver.cacheKey(WorldIdentifier.of(mc.level));
         int hashes=ClientLodHashStore.get().snapshotAsync(key,()->true).get(5,TimeUnit.SECONDS).size();
         require(hashes>0,"no received hashes: "+label);
         require(!base.toString().contains("UNKNOWN"),"UNKNOWN base");
@@ -65,7 +71,7 @@ public class LifecycleHarness implements ClientModInitializer {
         if(baseA==null) { baseA=base; worldA=world; }
         else if(sameBase) require(base.equals(baseA),"reconnect changed base");
         var renderer=((IGetVoxyRenderSystem)mc.levelRenderer).voxy$getRenderSystem();
-        require(renderer.getEngine()==WorldIdentifier.of(mc.level).getOrCreateEngine(),"renderer wrong world engine");
+        require(renderer.getEngine()==ClientLodReceiver.currentEngine(WorldIdentifier.of(mc.level)),"renderer wrong world engine");
         int[] saved = {0};
         renderer.getEngine().storage.iteratePositions(0,k->saved[0]++);
         require(saved[0]>0,"no stored sections: "+label);
@@ -77,7 +83,7 @@ public class LifecycleHarness implements ClientModInitializer {
         try {
             if((System.nanoTime()-start)/1e9>260) throw new AssertionError("timeout phase="+phase);
             switch(phase) {
-                case 0: if(mc.getOverlay()==null && elapsed()>2) { mc.setScreen(new TitleScreen()); connect(mc,25585); next(1); } break;
+                case 0: if(mc.getOverlay()==null && elapsed()>2) { mc.setScreen(new TitleScreen()); boolean stress=Boolean.getBoolean("lifecycle.stressOnly"); connect(mc,25585); next(stress?13:1); } break;
                 case 1: if(ready(mc) && elapsed()>14 && overworld(mc)) { inspect(mc,"FIRST",true); mc.getConnection().sendCommand("execute in minecraft:the_nether run tp @s 0 100 0"); next(2); } break;
                 case 2: if(ready(mc) && mc.level.dimension().location().toString().equals("minecraft:the_nether") && elapsed()>12) { inspect(mc,"NETHER",true); mc.getConnection().sendCommand("execute in minecraft:overworld run tp @s 0 80 0"); next(3); } break;
                 case 3: if(ready(mc) && mc.level.dimension().location().toString().equals("minecraft:overworld") && elapsed()>10) { inspect(mc,"RETURN",true); disconnect(mc); next(4); } break;
@@ -89,9 +95,13 @@ public class LifecycleHarness implements ClientModInitializer {
                 case 9: if(elapsed()>.15) { disconnect(mc); log("RAPID_DISCONNECT"); next(10); } break;
                 case 10: if(elapsed()>3) { cleaned(); connect(mc,25585); next(11); } break;
                 case 11: if(ready(mc) && elapsed()>12 && overworld(mc)) { inspect(mc,"AFTER_RAPID_RECONNECT",true); disconnect(mc); next(12); } break;
-                case 12: if(elapsed()>3) { cleaned(); log("PASS"); Files.write(mc.gameDirectory.toPath().resolve("lifecycle-result.txt"),results); mc.stop(); next(18); } break;
-
+                case 12: if(elapsed()>3) { cleaned(); connect(mc,25586); next(13); } break;
+                case 13: if(ready(mc) && elapsed()>2) { holdIngest=true; mc.getConnection().sendCommand("execute in minecraft:the_nether run tp @s 0 100 0"); next(14); } break;
+                case 14: if(ready(mc) && mc.level.dimension().location().toString().equals("minecraft:the_nether") && (Integer)field(ClientLodReceiver.class,"reservedBatches")>0) { log("DISCONNECT_DURING_DIMENSION_STREAM reservations="+field(ClientLodReceiver.class,"reservedBatches")); disconnect(mc); holdIngest=false; next(15); } break;
+                case 15: if(elapsed()>3) { cleaned(); connect(mc,25585); next(16); } break;
+                case 16: if(ready(mc) && elapsed()>10) { inspect(mc,"AFTER_DIMENSION_DISCONNECT",true); disconnect(mc); next(17); } break;
+                case 17: if(elapsed()>3) { cleaned(); log("PASS"); Files.write(mc.gameDirectory.toPath().resolve("lifecycle-result.txt"),results); mc.stop(); next(18); } break;
             }
-        } catch(Throwable t) { t.printStackTrace(); log("FAIL "+t); try { Files.write(mc.gameDirectory.toPath().resolve("lifecycle-result.txt"),results); } catch(Exception ignored) {} mc.stop(); next(18); }
+        } catch(Throwable t) { holdIngest=false; t.printStackTrace(); log("FAIL "+t); try { Files.write(mc.gameDirectory.toPath().resolve("lifecycle-result.txt"),results); } catch(Exception ignored) {} mc.stop(); next(18); }
     }); }
 }

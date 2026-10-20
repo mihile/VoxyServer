@@ -35,8 +35,9 @@ try:
                     p.stdin.write('op LifecycleTest\n');p.stdin.flush()
         if len(ready)==2 and client is None:
             if '--production' in sys.argv:
+                extra=['-Dlifecycle.stressOnly=true'] if '--stress-only' in sys.argv else []
                 game=Path((root/'build/production-client-directory.txt').read_text(encoding='utf-8'))
-                client=launch('production-client',[java,'@'+str(root/'build/production-client.args')],game)
+                client=launch('stress-client' if extra else 'production-client',[java]+extra+['@'+str(root/'build/production-client.args')],game)
             else:
                 client=launch('client',['cmd','/c','gradlew.bat','-I','verification/lifecycle/lifecycle.init.gradle','runClient','--console=plain'],root)
         if client is not None and client.poll() is not None: break

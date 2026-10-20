@@ -21,7 +21,7 @@ public abstract class VoxyInstanceMixin implements IVoxyServerIngestAccess {
     private RemoteIngestService voxyserver$remoteIngestService;
 
     @Unique
-    private boolean voxyserver$usingRemoteIngest = false;
+    private volatile boolean voxyserver$usingRemoteIngest = false;
 
     @Shadow
     public abstract ServiceManager getServiceManager();
@@ -65,6 +65,9 @@ public abstract class VoxyInstanceMixin implements IVoxyServerIngestAccess {
     public RemoteIngestService voxyserver$getRemoteIngestService() {
         return this.voxyserver$remoteIngestService;
     }
+
+    @Override
+    public boolean voxyserver$isUsingRemoteIngest() { return this.voxyserver$usingRemoteIngest; }
 
     @Override
     public void voxyserver$setUsingRemoteIngest(boolean remoteIngest) {

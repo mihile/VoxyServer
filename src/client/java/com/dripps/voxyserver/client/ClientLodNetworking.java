@@ -4,17 +4,18 @@ import com.dripps.voxyserver.network.*;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.fabricmc.fabric.api.networking.v1.PacketByteBufs;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientPacketListener;
 import net.minecraft.network.FriendlyByteBuf;
 import java.util.function.BiConsumer;
 
 public final class ClientLodNetworking {
-    public record Context(Minecraft client) {}
+    public record Context(Minecraft client, ClientPacketListener handler) {}
     public static <T extends LodPayload> void registerGlobalReceiver(LodPayload.Type<T> type, BiConsumer<T, Context> receiver) {
         PacketCodec<FriendlyByteBuf, T> codec = PayloadCodecs.forType(type);
         ClientPlayNetworking.registerGlobalReceiver(type.id(), (client, handler, buffer, sender) -> {
             T payload = codec.decode(buffer);
             PayloadCodecs.requireConsumed(buffer);
-            receiver.accept(payload, new Context(client));
+            receiver.accept(payload, new Context(client, handler));
         });
     }
     public static boolean canSend(LodPayload.Type<?> type) { return ClientPlayNetworking.canSend(type.id()); }

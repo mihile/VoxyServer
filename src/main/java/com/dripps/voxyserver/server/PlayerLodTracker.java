@@ -1,5 +1,6 @@
 package com.dripps.voxyserver.server;
 
+import it.unimi.dsi.fastutil.longs.Long2LongLinkedOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import me.cortex.voxy.common.world.WorldEngine;
 import net.minecraft.resources.ResourceLocation;
@@ -11,14 +12,24 @@ import java.util.LinkedHashMap;
 
 public class PlayerLodTracker {
     public static final long NO_SECTION_KEY = -1L;
+    public static final int MAX_ACKNOWLEDGED_HASHES = 262_144;
+    public static final int PRUNE_TARGET_HASHES = 229_376;
+    public static final int MAX_PRUNE_STEPS_PER_CALL = 256;
+    private static final int INSERT_EVICT_PROBE_LIMIT = 4;
     private static final int MAX_OUTSTANDING_BATCHES = 32;
     private static final int MAX_OUTSTANDING_SECTIONS = 512;
     private static final long MAX_OUTSTANDING_BYTES = 64L * 1024L * 1024L;
 
-    private final Long2LongOpenHashMap acknowledgedSectionHashes = new Long2LongOpenHashMap();
+    private final int maxAcknowledgedHashes;
+    private final int pruneTargetHashes;
+    private final int maxPruneStepsPerCall;
+    private final Long2LongLinkedOpenHashMap acknowledgedSectionHashes = new Long2LongLinkedOpenHashMap();
     private final Long2LongOpenHashMap sectionOwners = new Long2LongOpenHashMap();
     private final Map<Long, OutstandingBatch> outstandingBatches = new HashMap<>();
     private final Map<Long, Long> deferredDirtySections = new LinkedHashMap<>();
+    private boolean pruningActive = false;
+    private int pruneScannedInCycle = 0;
+    private int knownActiveDimOrdinal = 0;
     private int manifestCenterX;
     private int manifestCenterZ;
     private int manifestRadius = -1;
@@ -63,6 +74,13 @@ public class PlayerLodTracker {
     private record OutstandingBatch(long[] sectionKeys, long[] hashes, int bytes, long createdTick) {}
 
     public PlayerLodTracker() {
+        this(MAX_ACKNOWLEDGED_HASHES, PRUNE_TARGET_HASHES, MAX_PRUNE_STEPS_PER_CALL);
+    }
+
+    PlayerLodTracker(int maxAcknowledgedHashes, int pruneTargetHashes, int maxPruneStepsPerCall) {
+        this.maxAcknowledgedHashes = Math.max(1, maxAcknowledgedHashes);
+        this.pruneTargetHashes = Math.max(1, Math.min(pruneTargetHashes, this.maxAcknowledgedHashes));
+        this.maxPruneStepsPerCall = Math.max(1, maxPruneStepsPerCall);
         this.acknowledgedSectionHashes.defaultReturnValue(0L);
         this.sectionOwners.defaultReturnValue(0L);
     }
@@ -95,12 +113,11 @@ public class PlayerLodTracker {
     public synchronized boolean applyManifestBatch(ResourceLocation dimension, long epoch, long requestId,
                                                     int dimensionOrdinal, long[] sectionKeys, long[] hashes) {
         if (!matchesManifestLocked(dimension, epoch, requestId)) return false;
+        this.knownActiveDimOrdinal = dimensionOrdinal;
         int count = Math.min(sectionKeys.length, hashes.length);
         for (int i = 0; i < count; i++) {
             long sectionKey = LodStreamingService.composeSectionKey(dimensionOrdinal, sectionKeys[i]);
-            if (!acknowledgedSectionHashes.containsKey(sectionKey)) {
-                acknowledgedSectionHashes.put(sectionKey, hashes[i]);
-            }
+            putAcknowledgedLocked(sectionKey, hashes[i], false);
         }
         return true;
     }
@@ -200,13 +217,59 @@ public class PlayerLodTracker {
         releaseBatchLocked(batchId, batch);
         if (success) {
             for (int i = 0; i < batch.sectionKeys.length; i++) {
-                acknowledgedSectionHashes.put(batch.sectionKeys[i], batch.hashes[i]);
+                if (i == 0) {
+                    this.knownActiveDimOrdinal = (int) (batch.sectionKeys[0] >>> 60) & 0xF;
+                }
+                putAcknowledgedLocked(batch.sectionKeys[i], batch.hashes[i], true);
             }
         } else {
             retryNotBeforeTick = Math.max(retryNotBeforeTick, tick + 100L);
             resetScanStateLocked();
         }
         return true;
+    }
+
+    private void putAcknowledgedLocked(long compositeKey, long hash, boolean overwrite) {
+        if (!overwrite && acknowledgedSectionHashes.containsKey(compositeKey)) {
+            return;
+        }
+        acknowledgedSectionHashes.putAndMoveToLast(compositeKey, hash);
+        if (acknowledgedSectionHashes.size() > maxAcknowledgedHashes) {
+            pruningActive = true;
+            pruneScannedInCycle = 0;
+            while (acknowledgedSectionHashes.size() > maxAcknowledgedHashes) {
+                evictOneFromHeadLocked();
+            }
+        }
+    }
+
+    private void evictOneFromHeadLocked() {
+        int centerSecX = scanGeometryInitialized ? scanCenterSecX : (lastChunkX != 0 ? (lastChunkX >> 1) : manifestCenterX);
+        int centerSecZ = scanGeometryInitialized ? scanCenterSecZ : (lastChunkZ != 0 ? (lastChunkZ >> 1) : manifestCenterZ);
+        int baseRadius = scanRadiusSections > 0 ? scanRadiusSections : (manifestRadius > 0 ? manifestRadius : 32);
+        int keepRadius = Math.max(baseRadius * 2, 32);
+        int probes = Math.min(INSERT_EVICT_PROBE_LIMIT, acknowledgedSectionHashes.size());
+        for (int i = 0; i < probes; i++) {
+            long headKey = acknowledgedSectionHashes.firstLongKey();
+            if (isOutOfRangeKey(headKey, knownActiveDimOrdinal, centerSecX, centerSecZ, keepRadius)) {
+                acknowledgedSectionHashes.removeFirstLong();
+                return;
+            }
+            if (i + 1 < probes) {
+                acknowledgedSectionHashes.getAndMoveToLast(headKey);
+            }
+        }
+        acknowledgedSectionHashes.removeFirstLong();
+    }
+
+    private static boolean isOutOfRangeKey(long compositeKey, int activeDimOrdinal, int centerSecX, int centerSecZ, int keepRadius) {
+        int dimOrd = (int) (compositeKey >>> 60) & 0xF;
+        long sectionKey = compositeKey & 0x0FFFFFFFFFFFFFFFL;
+        int secX = WorldEngine.getX(sectionKey);
+        int secZ = WorldEngine.getZ(sectionKey);
+        return dimOrd != activeDimOrdinal
+                || Math.abs(secX - centerSecX) > keepRadius
+                || Math.abs(secZ - centerSecZ) > keepRadius;
     }
 
     public synchronized boolean hasTimedOutBatch(long tick, long timeoutTicks) {
@@ -252,6 +315,8 @@ public class PlayerLodTracker {
 
     public synchronized void reset() {
         acknowledgedSectionHashes.clear();
+        pruningActive = false;
+        pruneScannedInCycle = 0;
         clearOutstandingLocked();
         awaitingManifestDim = null;
         retryNotBeforeTick = 0L;
@@ -300,6 +365,82 @@ public class PlayerLodTracker {
 
     public synchronized int sentCount() {
         return acknowledgedSectionHashes.size();
+    }
+
+    public synchronized long estimatedMetadataBytes() {
+        return (long) acknowledgedSectionHashes.size() * 32L
+                + (long) sectionOwners.size() * 24L
+                + (long) deferredDirtySections.size() * 48L
+                + (long) outstandingBatches.size() * 64L
+                + outstandingBytes;
+    }
+
+    public synchronized int pruneOutOfRangeAcknowledged(int activeDimOrdinal, int centerSecX, int centerSecZ, int keepRadiusSections) {
+        return pruneOutOfRangeAcknowledged(
+                activeDimOrdinal,
+                centerSecX,
+                centerSecZ,
+                keepRadiusSections,
+                maxAcknowledgedHashes,
+                pruneTargetHashes,
+                maxPruneStepsPerCall
+        );
+    }
+
+    synchronized int pruneOutOfRangeAcknowledged(
+            int activeDimOrdinal,
+            int centerSecX,
+            int centerSecZ,
+            int keepRadiusSections,
+            int maxHashes,
+            int targetHashes,
+            int maxStepsPerCall) {
+        this.knownActiveDimOrdinal = activeDimOrdinal;
+        int currentSize = acknowledgedSectionHashes.size();
+        if (currentSize > maxHashes) {
+            pruningActive = true;
+        }
+        if (!pruningActive) {
+            return 0;
+        }
+        if (currentSize <= targetHashes) {
+            pruningActive = false;
+            pruneScannedInCycle = 0;
+            return 0;
+        }
+        int stepsLimit = Math.max(1, maxStepsPerCall);
+        int keepRadius = Math.max(keepRadiusSections, 32);
+        int removed = 0;
+        int steps = 0;
+        while (steps < stepsLimit && !acknowledgedSectionHashes.isEmpty()) {
+            int size = acknowledgedSectionHashes.size();
+            if (size <= targetHashes) {
+                pruningActive = false;
+                pruneScannedInCycle = 0;
+                break;
+            }
+            if (size <= maxHashes && pruneScannedInCycle >= size) {
+                // Completed a full rotation of remaining in-range entries and size is within maxHashes.
+                pruningActive = false;
+                pruneScannedInCycle = 0;
+                break;
+            }
+            steps++;
+            long compositeKey = acknowledgedSectionHashes.firstLongKey();
+            boolean outOfRange = isOutOfRangeKey(compositeKey, activeDimOrdinal, centerSecX, centerSecZ, keepRadius);
+            if (outOfRange || (size > maxHashes && pruneScannedInCycle >= size)) {
+                acknowledgedSectionHashes.removeFirstLong();
+                removed++;
+            } else {
+                acknowledgedSectionHashes.getAndMoveToLast(compositeKey);
+                pruneScannedInCycle++;
+            }
+        }
+        return removed;
+    }
+
+    synchronized boolean isPruningActive() {
+        return pruningActive;
     }
 
     private boolean matchesManifestLocked(ResourceLocation dimension, long epoch, long requestId) {

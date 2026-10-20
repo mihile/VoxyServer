@@ -21,6 +21,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.function.Supplier;
 
 public final class VoxyServerCommands {
@@ -316,7 +317,8 @@ public final class VoxyServerCommands {
                 .append(kv("hashcache", s.hashCacheSize(), ChatFormatting.WHITE)).append(sep())
                 .append(kv("pending", s.pendingDirty(), ChatFormatting.WHITE)).append(sep())
                 .append(kv("queued", s.queuedDirty(), ChatFormatting.WHITE)).append(sep())
-                .append(kv("chunks", s.loadedChunks(), ChatFormatting.WHITE));
+                .append(kv("chunks", s.loadedChunks(), ChatFormatting.WHITE)).append(sep())
+                .append(kv("meta", formatBytes(s.estimatedMetadataBytes()), ChatFormatting.WHITE));
 
         out.append(Component.literal("\n"))
                 .append(kv("voxelized", counters.chunksVoxelized(), ChatFormatting.WHITE)).append(sep())
@@ -341,6 +343,17 @@ public final class VoxyServerCommands {
                     .append(Component.literal(p.chunkX() + "," + p.chunkZ()).withStyle(ChatFormatting.WHITE));
         }
         return out;
+    }
+
+    static String formatBytes(long bytes) {
+        if (bytes < 1024L) {
+            return bytes + "B";
+        }
+        double kib = bytes / 1024.0;
+        if (kib < 1024.0) {
+            return String.format(Locale.ROOT, "%.1fKiB", kib);
+        }
+        return String.format(Locale.ROOT, "%.2fMiB", kib / 1024.0);
     }
 
     private static MutableComponent block(String title) {

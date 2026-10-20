@@ -5,7 +5,7 @@ import com.dripps.voxyserver.network.LODPreferencesPayload;
 import com.dripps.voxyserver.network.LODStreamSessionPayload;
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import me.cortex.voxy.common.world.WorldEngine;
-import me.cortex.voxy.commonImpl.VoxyCommon;
+import com.dripps.voxyserver.util.ClientCacheKey;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
 import com.dripps.voxyserver.client.ClientLodNetworking;
 import net.minecraft.client.Minecraft;
@@ -48,7 +48,7 @@ public final class ClientLodSettings {
     private static String activeServerKey;
     private static ClientLodConfig.Preferences activePreferences = CONFIG.getPreferencesForServer(null);
 
-    private record ManifestRequest(WorldIdentifier worldId, ResourceLocation dimension,
+    private record ManifestRequest(WorldEngine engine, ClientCacheKey cacheKey, ResourceLocation dimension,
                                    int playerSectionX, int playerSectionZ, int radiusSections,
                                    long streamEpoch, long requestId,
                                    long connectionGeneration, long buildGeneration) {}
@@ -68,7 +68,7 @@ public final class ClientLodSettings {
         streamEpoch = 0L;
         manifestRequestId = 0L;
         manifestChunks.clear();
-        pendingManifestRequest.set(null);
+        releasePendingManifest();
         connectionGeneration.incrementAndGet();
         buildGeneration.incrementAndGet();
         activeServerKey = resolveCurrentServerKey();
@@ -94,7 +94,7 @@ public final class ClientLodSettings {
         if (!enabled) {
             buildGeneration.incrementAndGet();
             manifestChunks.clear();
-            pendingManifestRequest.set(null);
+            releasePendingManifest();
         }
     }
 
@@ -104,7 +104,7 @@ public final class ClientLodSettings {
         manifestRequestId = payload.manifestRequestId();
         long generation = buildGeneration.incrementAndGet();
         manifestChunks.clear();
-        pendingManifestRequest.set(null);
+        releasePendingManifest();
         if (!payload.manifestRequired()) return;
         requestManifestBuild(payload, generation);
     }
@@ -142,8 +142,15 @@ public final class ClientLodSettings {
             enqueueTerminal(session, LODManifestPayload.FAILED, generation);
             return;
         }
+        WorldEngine engine = ClientLodReceiver.currentEngine(worldId);
+        ClientCacheKey key = ClientLodReceiver.cacheKey(worldId);
+        if (engine == null || key == null) {
+            enqueueTerminal(session, LODManifestPayload.FAILED, generation);
+            return;
+        }
+        engine.acquireRef();
         ManifestRequest request = new ManifestRequest(
-                worldId,
+                engine, key,
                 session.dimension(),
                 (player.getBlockX() >> 4) >> 1,
                 (player.getBlockZ() >> 4) >> 1,
@@ -153,6 +160,7 @@ public final class ClientLodSettings {
                 connectionGeneration.get(),
                 generation
         );
+        releasePendingManifest();
         pendingManifestRequest.set(request);
         scheduleManifestBuild();
     }
@@ -165,11 +173,12 @@ public final class ClientLodSettings {
     private static void startLatestManifestBuild() {
         ManifestRequest request = pendingManifestRequest.getAndSet(null);
         if (request == null || !isCurrent(request)) {
+            if (request != null) request.engine.releaseRef();
             finishManifestBuild();
             return;
         }
         ClientLodHashStore.get().snapshotAsync(
-                request.worldId.getWorldId(),
+                request.cacheKey,
                 () -> isCurrent(request)
         ).whenComplete((stored, error) -> manifestExecutor.execute(() -> {
             try {
@@ -180,6 +189,7 @@ public final class ClientLodSettings {
                     buildManifest(request, stored);
                 }
             } finally {
+                request.engine.releaseRef();
                 finishManifestBuild();
             }
         }));
@@ -191,12 +201,11 @@ public final class ClientLodSettings {
     }
 
     private static void buildManifest(ManifestRequest request, Long2LongOpenHashMap stored) {
-        WorldEngine engine = request.worldId.getOrCreateEngine();
+        WorldEngine engine = request.engine;
         if (engine == null || !engine.isLive()) {
             enqueueTerminal(request, LODManifestPayload.FAILED);
             return;
         }
-        engine.acquireRef();
         try {
             long[] keys = new long[LODManifestPayload.MAX_ENTRIES];
             long[] hashes = new long[LODManifestPayload.MAX_ENTRIES];
@@ -228,8 +237,6 @@ public final class ClientLodSettings {
         } catch (Throwable throwable) {
             me.cortex.voxy.common.Logger.error("voxyserver manifest build failed", throwable);
             if (isCurrent(request)) enqueueTerminal(request, LODManifestPayload.FAILED);
-        } finally {
-            engine.releaseRef();
         }
     }
 
@@ -282,6 +289,17 @@ public final class ClientLodSettings {
         return preferred <= 0 ? serverMaxRadius : Math.min(preferred, serverMaxRadius);
     }
 
+    private static void releasePendingManifest() {
+        ManifestRequest request = pendingManifestRequest.getAndSet(null);
+        if (request != null) request.engine.releaseRef();
+    }
+
+    public static void cancelManifest() {
+        buildGeneration.incrementAndGet();
+        manifestChunks.clear();
+        releasePendingManifest();
+    }
+
     public static void reset() {
         serverMaxRadius = -1;
         serverMaxSections = -1;
@@ -291,7 +309,7 @@ public final class ClientLodSettings {
         streamEpoch = 0L;
         manifestRequestId = 0L;
         manifestChunks.clear();
-        pendingManifestRequest.set(null);
+        releasePendingManifest();
         connectionGeneration.incrementAndGet();
         buildGeneration.incrementAndGet();
         activeServerKey = null;

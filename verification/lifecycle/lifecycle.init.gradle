@@ -29,7 +29,7 @@ allprojects { afterEvaluate {
     }
     def harnessCompile = tasks.register('compileLifecycleHarness', JavaCompile) {
         dependsOn tasks.named('clientClasses')
-        source project.file('verification/lifecycle/harness/src/test/LifecycleHarness.java')
+        source project.fileTree(project.file('verification/lifecycle/harness/src'))
         classpath = sourceSets.client.runtimeClasspath
         destinationDirectory = layout.buildDirectory.dir('lifecycle-harness/classes')
         options.release = 17

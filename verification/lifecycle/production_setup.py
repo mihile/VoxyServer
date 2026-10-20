@@ -2,13 +2,13 @@ from pathlib import Path
 import shutil,json,sys
 from datetime import datetime
 root=Path(__file__).resolve().parents[2]
-prefix='lifecycle-production-client-'
+prefix='lifecycle-stress-client-' if '--stress' in sys.argv else 'lifecycle-production-client-'
 game=root/'build'/(prefix+datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
 mods=game/'mods';mods.mkdir(parents=True,exist_ok=True)
 cache=Path.home()/'.gradle/caches'
 def artifact(group,name,version):
     return next((cache/'modules-2/files-2.1'/group/name/version).rglob(f'{name}-{version}.jar'))
-for src in [root/'libs/voxy.jar',root/'build/libs/VoxyServer-1.2.4+1.20.1-port.1.jar',
+for src in [root/'libs/voxy.jar',root/'build/libs/VoxyServer-1.2.4+1.20.1-port.2.jar',
             artifact('net.fabricmc.fabric-api','fabric-api','0.92.6+1.20.1'),
             artifact('maven.modrinth','sodium','mc1.20.1-0.5.13-fabric')]:
     shutil.copy2(src,mods/src.name)

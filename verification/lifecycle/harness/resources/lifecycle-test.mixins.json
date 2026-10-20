@@ -1,0 +1,1 @@
+{"required":true,"package":"test.mixin","compatibilityLevel":"JAVA_17","client":["WorkerBarrier"],"injectors":{"defaultRequire":1}}
