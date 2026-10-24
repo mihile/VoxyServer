@@ -5,6 +5,7 @@ import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import me.cortex.voxy.common.Logger;
 import net.fabricmc.loader.api.FabricLoader;
 import com.dripps.voxyserver.util.ClientCacheKey;
+import com.dripps.voxyserver.util.HashSidecarFiles;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -46,6 +47,8 @@ public final class ClientLodHashStore {
     private static final class State {
         private final Long2LongOpenHashMap hashes;
         private int dirty;
+        private long nextWarningNanos;
+        private boolean persistenceFailed;
 
         private State(Long2LongOpenHashMap hashes) {
             this.hashes = hashes;
@@ -153,31 +156,33 @@ public final class ClientLodHashStore {
                 flush(entry.getKey(), entry.getValue());
             }
         } catch (Throwable throwable) {
-            Logger.error("failed to flush hash sidecars", throwable);
+            Logger.warn("failed to flush optional LOD hash metadata; it will be retried", throwable);
         }
     }
 
     private void flush(ClientCacheKey worldId, State state) {
         if (state.dirty == 0) return;
         Path file = fileFor(worldId);
-        Path temporary = file.resolveSibling(file.getFileName() + ".tmp");
         try {
-            Files.createDirectories(file.getParent());
-            try (DataOutputStream out = new DataOutputStream(new BufferedOutputStream(Files.newOutputStream(temporary)))) {
+            HashSidecarFiles.write(file, out -> {
                 out.writeInt(state.hashes.size());
                 for (var entry : state.hashes.long2LongEntrySet()) {
                     out.writeLong(entry.getLongKey());
                     out.writeLong(entry.getLongValue());
                 }
-            }
-            try {
-                Files.move(temporary, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            } catch (AtomicMoveNotSupportedException ignored) {
-                Files.move(temporary, file, StandardCopyOption.REPLACE_EXISTING);
-            }
+            });
             state.dirty = 0;
+            if (state.persistenceFailed) Logger.info("LOD hash metadata persistence recovered", file);
+            state.persistenceFailed = false;
+            state.nextWarningNanos = 0;
         } catch (IOException exception) {
-            Logger.error("failed to flush hash sidecar", exception);
+            state.persistenceFailed = true;
+            long now = System.nanoTime();
+            if (state.nextWarningNanos == 0 || now - state.nextWarningNanos >= 0) {
+                state.nextWarningNanos = now + TimeUnit.MINUTES.toNanos(1);
+                // WARN stays in the log. Voxy's ERROR path also puts filesystem paths on the HUD.
+                Logger.warn("Could not save optional LOD hash metadata; keeping dirty state for retry", file, exception);
+            }
         }
     }
 
@@ -202,7 +207,7 @@ public final class ClientLodHashStore {
                 }
             }
         } catch (IOException exception) {
-            Logger.error("failed to load hash sidecat, treating as empty", exception);
+            Logger.warn("failed to load optional LOD hash sidecar, treating as empty", exception);
             result.clear();
         }
         return result;

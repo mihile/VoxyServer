@@ -4,6 +4,10 @@ a fabric server side mod that voxelizes chunks into LODs using [voxy](https://gi
 
 **Target: Minecraft 1.20.1 | Fabric | Java 17**
 
+`port.3` fixes client hash-sidecar replacement failures and keeps optional
+metadata warnings in the log instead of repeatedly displaying paths on the HUD.
+See the [port.3 notes](docs/RELEASE_PORT_3.md) for behavior and validation limits.
+
 Backported from the upstream `26.3` branch, commit
 `def7398c6bb20dba652fbcbd3a5adcc5947e586a` (VoxyServer 1.2.4).
 The reference Voxy build is `0.2.20-beta+1.20.1-port.7`, from the local
