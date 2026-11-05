@@ -190,11 +190,8 @@ public class ServerLodEngine extends VoxyInstance {
     }
 
     void releaseIdleIngestReferences() {
-        synchronized (this.ingestReferenceLock) {
-            if (this.getIngestService().getTaskCount() == 0) {
-                this.releaseIngestReferencesLocked();
-            }
-        }
+        // Retain the engine for this server session; shutdown releases these references.
+        // Avoid idle RocksDB close/reopen cycles between incoming chunk bursts.
     }
 
     void releaseIngestReferences() {

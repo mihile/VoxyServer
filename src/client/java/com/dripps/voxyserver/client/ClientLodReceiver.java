@@ -145,7 +145,8 @@ public final class ClientLodReceiver {
             // setLevel/allChanged can run before the first client tick. Attach the
             // renderer explicitly once the delayed instance exists.
             var rendering = (IGetVoxyRenderSystem) client.levelRenderer;
-            if (rendering.voxy$getRenderSystem() == null) rendering.voxy$createRenderer();
+            // Iris rebuilds the terrain pipeline on its first frame; let Voxy's Iris hook create it once.
+            if (rendering.voxy$getRenderSystem() == null && !me.cortex.voxy.client.core.util.IrisUtil.irisShaderPackEnabled()) rendering.voxy$createRenderer();
             Voxyserver.LOGGER.info("client cache ready: server={}, root={}, thread={}",
                     joined.handler().getServerData() == null ? "singleplayer" : joined.handler().getServerData().ip,
                     actual, Thread.currentThread().getName());

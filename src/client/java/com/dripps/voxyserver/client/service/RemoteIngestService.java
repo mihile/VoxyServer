@@ -69,7 +69,7 @@ public final class RemoteIngestService {
         @Override
         public void run() {
             int status = LODBatchResultPayload.FAILURE;
-            try {
+            try (var scratch = com.dripps.voxyserver.util.RemoteIngestScratch.begin()) {
                 status = process(this);
             } catch (Throwable throwable) {
                 Logger.error("remote ingest failed", throwable);
@@ -196,7 +196,7 @@ public final class RemoteIngestService {
             for (int oy = 0; oy < 2; oy++) {
                 for (int oz = 0; oz < 2; oz++) {
                     for (int ox = 0; ox < 2; ox++) {
-                        VoxelizedSection voxelized = VoxelizedSection.createEmpty();
+                        VoxelizedSection voxelized = com.dripps.voxyserver.util.RemoteIngestScratch.acquire();
                         voxelized.setPosition(secX * 2 + ox, secY * 2 + oy, secZ * 2 + oz);
                         int nonAirCount = 0;
                         for (int vy = 0; vy < 16; vy++) {

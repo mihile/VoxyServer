@@ -88,7 +88,7 @@ public record LODBulkPayload(
             }
             int entriesPerLong = 64 / bitsPerEntry;
             long mask = (1L << bitsPerEntry) - 1;
-            short[] indexArray = new short[indexLen];
+            short[] indexArray = com.dripps.voxyserver.util.RemoteIngestScratch.indices(indexLen);
             int idx = 0;
             while (idx < indexLen) {
                 long packed = buf.readLong();

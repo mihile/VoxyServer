@@ -649,9 +649,12 @@ public class LodStreamingService {
         }
     }
 
+    private static final ThreadLocal<long[]> serializationScratch = ThreadLocal.withInitial(() -> new long[WorldSection.SECTION_VOLUME]);
+
     private LODSectionPayload serializeSection(WorldSection section, ResourceLocation dimension,
                                                 Mapper mapper, Registry<Biome> biomeRegistry) {
-        long[] data = section.copyData();
+        long[] data = serializationScratch.get();
+        section.copyDataTo(data);
 
         // build LUT of unique mapping ids
         Long2ShortOpenHashMap lutMap = new Long2ShortOpenHashMap();

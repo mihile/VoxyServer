@@ -25,6 +25,8 @@ public class ChunkVoxelizer {
     private final boolean ingestOnChunkUnload;
     private final ConcurrentHashMap<PendingChunk, RetryState> pendingChunkRetries = new ConcurrentHashMap<>();
     private long currentTick;
+    private long loadBudgetTick = Long.MIN_VALUE;
+    private int loadsThisTick;
 
     private record PendingChunk(ResourceLocation dimension, int chunkX, int chunkZ) {}
     private record RetryState(long nextAttemptTick, int completedAttempts) {}
@@ -52,6 +54,8 @@ public class ChunkVoxelizer {
 
     private void onChunkLoad(ServerLevel level, LevelChunk chunk) {
         streamingService.onChunkLoadStateChanged(level.dimension().location(), chunk.getPos().x, chunk.getPos().z, true);
+        if (loadBudgetTick != currentTick) { loadBudgetTick = currentTick; loadsThisTick = 0; }
+        if (loadsThisTick++ >= 8) { scheduleRetry(level, chunk); return; }
         if (ingestChunk(level, chunk, true) == IngestOutcome.ACCEPTED) {
             pendingChunkRetries.remove(new PendingChunk(level.dimension().location(), chunk.getPos().x, chunk.getPos().z));
             return;
