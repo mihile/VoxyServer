@@ -1,0 +1,108 @@
+package com.dripps.voxyserver.network;
+
+import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.resources.ResourceLocation;
+
+import java.util.ArrayList;
+import java.util.List;
+
+// batch of lod sections sent together for efficiency
+public record LODBulkPayload(
+        ResourceLocation dimension,
+        List<LODSectionPayload> sections
+) implements LodPayload {
+
+    public static final int MAX_SECTIONS = PreSerializedLodPayload.MAX_SECTIONS;
+    public static final int MAX_LUT_ENTRIES = 32_768;
+    public static final int MAX_INDEX_ENTRIES = 32_768;
+
+    public static final Type<LODBulkPayload> TYPE =
+            new Type<>(new ResourceLocation("voxyserver:lod_bulk"));
+
+    public static final PacketCodec<FriendlyByteBuf, LODBulkPayload> CODEC =
+            PacketCodec.of(LODBulkPayload::write, LODBulkPayload::read);
+
+    private static void write(FriendlyByteBuf buf, LODBulkPayload payload) {
+        if (payload.sections.isEmpty() || payload.sections.size() > MAX_SECTIONS) {
+            throw new IllegalArgumentException("invalid bulk section count");
+        }
+        buf.writeResourceLocation(payload.dimension);
+        buf.writeVarInt(payload.sections.size());
+        for (LODSectionPayload section : payload.sections) {
+            buf.writeLong(section.sectionKey());
+            buf.writeLong(section.contentHash());
+            int lutLen = section.lutBlockStateIds().length;
+            buf.writeVarInt(lutLen);
+            for (int i = 0; i < lutLen; i++) {
+                buf.writeVarInt(section.lutBlockStateIds()[i]);
+                buf.writeVarInt(section.lutBiomeIds()[i]);
+                buf.writeByte(section.lutLight()[i]);
+            }
+
+            // pack indices at minimum bit width for lut size
+            short[] indexArray = section.indexArray();
+            int bitsPerEntry = Math.max(1, 32 - Integer.numberOfLeadingZeros(Math.max(lutLen - 1, 0)));
+            int entriesPerLong = 64 / bitsPerEntry;
+            int longCount = (indexArray.length + entriesPerLong - 1) / entriesPerLong;
+
+            buf.writeVarInt(indexArray.length);
+            buf.writeByte(bitsPerEntry);
+            for (int li = 0; li < longCount; li++) {
+                long packed = 0L;
+                int base = li * entriesPerLong;
+                for (int ei = 0; ei < entriesPerLong && base + ei < indexArray.length; ei++) {
+                    packed |= ((long) (indexArray[base + ei] & 0xFFFF)) << (ei * bitsPerEntry);
+                }
+                buf.writeLong(packed);
+            }
+        }
+    }
+
+    private static LODBulkPayload read(FriendlyByteBuf buf) {
+        ResourceLocation dimension = buf.readResourceLocation();
+        int count = buf.readVarInt();
+        if (count < 1 || count > MAX_SECTIONS) {
+            throw new IllegalArgumentException("invalid bulk section count: " + count);
+        }
+        List<LODSectionPayload> sections = new ArrayList<>(count);
+        for (int s = 0; s < count; s++) {
+            long sectionKey = buf.readLong();
+            long contentHash = buf.readLong();
+            int lutLen = buf.readVarInt();
+            if (lutLen < 1 || lutLen > MAX_LUT_ENTRIES) {
+                throw new IllegalArgumentException("invalid lookup table size: " + lutLen);
+            }
+            int[] blockStateIds = new int[lutLen];
+            int[] biomeIds = new int[lutLen];
+            byte[] light = new byte[lutLen];
+            for (int i = 0; i < lutLen; i++) {
+                blockStateIds[i] = buf.readVarInt();
+                biomeIds[i] = buf.readVarInt();
+                light[i] = buf.readByte();
+            }
+            int indexLen = buf.readVarInt();
+            int bitsPerEntry = buf.readByte() & 0xFF;
+            if (indexLen < 1 || indexLen > MAX_INDEX_ENTRIES
+                    || bitsPerEntry < 1 || bitsPerEntry > 16) {
+                throw new IllegalArgumentException("invalid packed lod index data");
+            }
+            int entriesPerLong = 64 / bitsPerEntry;
+            long mask = (1L << bitsPerEntry) - 1;
+            short[] indexArray = com.dripps.voxyserver.util.RemoteIngestScratch.indices(indexLen);
+            int idx = 0;
+            while (idx < indexLen) {
+                long packed = buf.readLong();
+                for (int ei = 0; ei < entriesPerLong && idx < indexLen; ei++, idx++) {
+                    indexArray[idx] = (short) ((packed >> (ei * bitsPerEntry)) & mask);
+                }
+            }
+            sections.add(new LODSectionPayload(dimension, sectionKey, blockStateIds, biomeIds, light, indexArray, contentHash));
+        }
+        return new LODBulkPayload(dimension, sections);
+    }
+
+    @Override
+    public Type<? extends LodPayload> type() {
+        return TYPE;
+    }
+}

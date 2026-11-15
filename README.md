@@ -1,5 +1,8 @@
 # VoxyServer 1.20.1 backport
 
+The separate Minecraft 1.20.1 Forge port for Neo Voxy is in
+[`forge-1.20.1`](forge-1.20.1/README.md). The Fabric build below remains separate.
+
 a fabric server side mod that voxelizes chunks into LODs using [voxy](https://github.com/MCRcortex/voxy) and streams them to connected clients. players with voxy installed will receive LOD data from the server automatically, no client side world scanning/loading needed.
 
 **Target: Minecraft 1.20.1 | Fabric | Java 17**

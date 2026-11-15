@@ -1,0 +1,32 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="GPL-3.0-only"
+
+[[mods]]
+modId="voxyserver"
+version="${version}"
+displayName="VoxyServer Forge"
+description="Streams server-generated Voxy LOD data to compatible clients."
+authors="dripps and contributors"
+displayTest="IGNORE_ALL_VERSION"
+
+[[dependencies.voxyserver]]
+modId="forge"
+mandatory=true
+versionRange="[47.3,)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.voxyserver]]
+modId="minecraft"
+mandatory=true
+versionRange="[1.20.1]"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.voxyserver]]
+modId="voxy"
+mandatory=true
+versionRange="[0.4.0beta,0.4.1)"
+ordering="AFTER"
+side="BOTH"

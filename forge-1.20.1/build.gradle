@@ -1,0 +1,102 @@
+plugins {
+    id 'dev.architectury.loom' version '1.6.422'
+}
+
+group = 'com.dripps'
+version = project.mod_version
+base { archivesName = 'VoxyServer-Forge' }
+
+repositories {
+    mavenCentral()
+    maven { url = 'https://maven.minecraftforge.net/' }
+    maven { url = 'https://maven.blamejared.com/' }
+}
+configurations.configureEach {
+    resolutionStrategy.eachDependency {
+        if (requested.group == 'dev.architectury' && requested.name == 'mixin-patched') useVersion '0.8.5.12'
+    }
+}
+loom {
+    silentMojangMappingsLicense()
+    forge { mixinConfigs = ['voxyserver.mixins.json', 'voxyserver.client.mixins.json'] }
+    mixin.defaultRefmapName = 'voxyserver.refmap.json'
+    runs {
+        server { server(); mods { voxyserver { sourceSet sourceSets.main } } }
+        client { client(); mods { voxyserver { sourceSet sourceSets.main } } }
+    }
+}
+
+def referenceJar = file(findProperty('voxy_jar') ?: '../../neovoxy/editions/forge-1.20.1-client/build/libs/neo-voxy-0.4.0beta-mc1.20.1-forge-client.jar')
+if (!referenceJar.isFile()) throw new GradleException("Build Neo Voxy 1.20.1 Forge first, or set -Pvoxy_jar=<path>: ${referenceJar}")
+
+configurations { bundledLwjgl }
+
+dependencies {
+    bundledLwjgl('org.lwjgl:lwjgl:3.3.1') { transitive = false }
+    bundledLwjgl('org.lwjgl:lwjgl:3.3.1:natives-windows') { transitive = false }
+    bundledLwjgl('org.lwjgl:lwjgl:3.3.1:natives-linux') { transitive = false }
+    bundledLwjgl('org.lwjgl:lwjgl:3.3.1:natives-linux-arm64') { transitive = false }
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    mappings loom.officialMojangMappings()
+    forge "net.minecraftforge:forge:${project.minecraft_version}-${project.forge_version}"
+    modImplementation files(referenceJar)
+    modCompileOnly 'org.embeddedt:embeddium-1.20.1:0.3.31-beta.53+mc1.20.1'
+    implementation platform('org.lwjgl:lwjgl-bom:3.3.1')
+    implementation 'org.lwjgl:lwjgl'
+    implementation 'org.lwjgl:lwjgl-zstd'
+    implementation 'org.lwjgl:lwjgl-lmdb'
+    annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
+    testImplementation 'junit:junit:4.13.2'
+}
+processResources {
+    inputs.property 'version', project.version
+    filesMatching('META-INF/mods.toml') { expand version: project.version }
+}
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8'; options.release = 17 }
+java { withSourcesJar() }
+def bundledLwjglJar = tasks.register('bundledLwjglJar', Jar) {
+    archiveFileName = 'voxyserver-lwjgl-3.3.1.jar'
+    destinationDirectory = layout.buildDirectory.dir('lwjgl')
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from { configurations.bundledLwjgl.collect { zipTree(it) } }
+    exclude 'META-INF/MANIFEST.MF', 'META-INF/INDEX.LIST', 'META-INF/*.SF', 'META-INF/*.RSA', 'META-INF/*.DSA'
+    manifest { attributes 'Multi-Release': 'true', 'Automatic-Module-Name': 'org.lwjgl' }
+}
+jar {
+    dependsOn bundledLwjglJar
+    from(bundledLwjglJar) { into 'META-INF/jars' }
+    from('../LICENSE') { rename { 'LICENSE_VoxyServer' } }
+    entryCompression = ZipEntryCompression.STORED
+}
+
+// Minecraft clients already provide LWJGL. A second org.lwjgl module causes
+// Forge's module-layer resolution to fail, so distribute a client variant
+// without the server-only nested library.
+tasks.named('remapJar') { archiveClassifier.set('server') }
+def clientJarFile = layout.buildDirectory.file("libs/${base.archivesName.get()}-${project.version}-client.jar")
+tasks.register('clientJar') {
+    dependsOn tasks.named('remapJar')
+    inputs.file(tasks.named('remapJar').flatMap { it.archiveFile })
+    outputs.file(clientJarFile)
+    doLast {
+        def source = tasks.named('remapJar').get().archiveFile.get().asFile
+        def target = clientJarFile.get().asFile
+        target.parentFile.mkdirs()
+        new java.util.zip.ZipFile(source).withCloseable { input ->
+            new java.util.zip.ZipOutputStream(new BufferedOutputStream(new FileOutputStream(target))).withCloseable { output ->
+                def entries = input.entries()
+                while (entries.hasMoreElements()) {
+                    def entry = entries.nextElement()
+                    if (entry.name == 'META-INF/jarjar/metadata.json' ||
+                            entry.name == 'META-INF/jars/voxyserver-lwjgl-3.3.1.jar') continue
+                    def copy = new java.util.zip.ZipEntry(entry.name)
+                    copy.time = entry.time
+                    output.putNextEntry(copy)
+                    if (!entry.directory) input.getInputStream(entry).withCloseable { it.transferTo(output) }
+                    output.closeEntry()
+                }
+            }
+        }
+    }
+}
+tasks.named('build') { dependsOn tasks.named('clientJar') }

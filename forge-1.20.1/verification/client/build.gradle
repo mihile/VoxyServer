@@ -1,0 +1,40 @@
+plugins { id 'dev.architectury.loom' version '1.6.422' }
+repositories {
+    mavenCentral()
+    maven { url = 'https://maven.minecraftforge.net/' }
+    maven { url = 'https://maven.blamejared.com/' }
+}
+configurations.configureEach {
+    resolutionStrategy.eachDependency {
+        if (requested.group == 'dev.architectury' && requested.name == 'mixin-patched') useVersion '0.8.5.12'
+    }
+}
+loom {
+    silentMojangMappingsLicense()
+    runs {
+        client {
+            client()
+            runDir 'build/game'
+            vmArg '-Xmx2G'
+            programArg '--username'; programArg 'VoxyTest'
+            programArg '--width'; programArg '854'
+            programArg '--height'; programArg '480'
+            mods { voxyserver_verify { sourceSet sourceSets.main } }
+        }
+    }
+}
+dependencies {
+    minecraft 'com.mojang:minecraft:1.20.1'
+    mappings loom.officialMojangMappings()
+    forge 'net.minecraftforge:forge:1.20.1-47.3.0'
+    modCompileOnly files('../../build/libs/VoxyServer-Forge-1.2.4+1.20.1-forge.2-client.jar')
+    modCompileOnly files('../../../../neovoxy/editions/forge-1.20.1-client/build/libs/neo-voxy-0.4.0beta-mc1.20.1-forge-client.jar')
+    modCompileOnly files(findProperty('embeddium_jar') ?: 'build/deps/embeddium-0.3.31.jar')
+}
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8'; options.release = 17 }
+
+tasks.register('prepareVerificationMods', Exec) {
+    dependsOn tasks.named('compileJava')
+    commandLine 'python', 'prepare_mods.py', file(findProperty('embeddium_jar') ?: 'build/deps/embeddium-0.3.31.jar').absolutePath
+}
+tasks.named('runClient') { dependsOn tasks.named('prepareVerificationMods') }

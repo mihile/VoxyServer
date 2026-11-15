@@ -1,0 +1,8 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="GPL-3.0-only"
+[[mods]]
+modId="voxyserver_verify"
+version="1.0"
+displayName="VoxyServer verification harness"
+displayTest="IGNORE_ALL_VERSION"
