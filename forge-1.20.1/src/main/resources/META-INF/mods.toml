@@ -1,13 +1,16 @@
 modLoader="javafml"
 loaderVersion="[47,)"
 license="GPL-3.0-only"
+issueTrackerURL="https://github.com/mihile/VoxyServer/issues"
 
 [[mods]]
 modId="voxyserver"
 version="${version}"
 displayName="VoxyServer Forge"
-description="Streams server-generated Voxy LOD data to compatible clients."
-authors="dripps and contributors"
+displayURL="https://github.com/mihile/VoxyServer/tree/1.20.1_forge"
+description='''Unofficial Minecraft 1.20.1 Forge port maintained by mihile. Streams server-generated Voxy LOD data to compatible Forge clients.
+GitHub: https://github.com/mihile/VoxyServer/tree/1.20.1_forge'''
+authors="mihile (1.20.1 Forge port), based on VoxyServer by dripps and contributors"
 displayTest="IGNORE_ALL_VERSION"
 
 [[dependencies.voxyserver]]
